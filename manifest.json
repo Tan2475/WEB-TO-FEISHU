@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "Web to Feishu Scraper",
+  "version": "1.0.0",
+  "description": "Flexible web scraper to push arbitrary extracted data to Feishu Bitable.",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "*://*/*",
+    "https://open.feishu.cn/*"
+  ],
+  "background": {
+    "service_worker": "background/background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*/*"],
+      "js": ["content/content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "Scrape to Feishu"
+  },
+  "options_ui": {
+    "page": "options/options.html",
+    "open_in_tab": true
+  }
+}
