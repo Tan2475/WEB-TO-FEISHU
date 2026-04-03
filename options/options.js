@@ -37,22 +37,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Collect rules
     const rulesToSave = [];
     document.querySelectorAll('.rule-block').forEach(ruleBlock => {
-      const name = ruleBlock.querySelector('.rule-name').value.trim();
-      const url = ruleBlock.querySelector('.rule-url').value.trim();
-      const preSelector = ruleBlock.querySelector('.rule-pre-selector').value.trim();
-      const preType = ruleBlock.querySelector('.rule-pre-type').value;
-      
-      const fields = [];
-      ruleBlock.querySelectorAll('.field-item').forEach(fieldItem => {
-        const name = fieldItem.querySelector('.field-name').value.trim();
-        const selector = fieldItem.querySelector('.field-selector').value.trim();
-        const type = fieldItem.querySelector('.field-type').value;
-        if (name && (selector || type === 'current_url')) {
-          fields.push({ name, selector, type });
-        }
-      });
-      if (url || fields.length > 0) {
-        rulesToSave.push({ name: name || "未命名规则", url, preSelector, preType, fields });
+      const data = getRuleDataFromElement(ruleBlock);
+      if (data.url || data.fields.length > 0) {
+        rulesToSave.push({
+          name: data.name || "未命名规则",
+          url: data.url,
+          preSelector: data.preSelector,
+          preType: data.preType,
+          fields: data.fields
+        });
       }
     });
 
@@ -70,6 +63,24 @@ document.addEventListener('DOMContentLoaded', async () => {
     addRuleToUI({});
   });
 
+  function getRuleDataFromElement(ruleBlock) {
+    const name = ruleBlock.querySelector('.rule-name').value.trim();
+    const url = ruleBlock.querySelector('.rule-url').value.trim();
+    const preSelector = ruleBlock.querySelector('.rule-pre-selector').value.trim();
+    const preType = ruleBlock.querySelector('.rule-pre-type').value;
+    
+    const fields = [];
+    ruleBlock.querySelectorAll('.field-item').forEach(fieldItem => {
+      const fieldName = fieldItem.querySelector('.field-name').value.trim();
+      const selector = fieldItem.querySelector('.field-selector').value.trim();
+      const type = fieldItem.querySelector('.field-type').value;
+      if (fieldName && (selector || type === 'current_url')) {
+        fields.push({ name: fieldName, selector, type });
+      }
+    });
+    return { name, url, preSelector, preType, fields };
+  }
+
   function addRuleToUI(ruleData) {
     const clone = ruleTemplate.content.cloneNode(true);
     const ruleBlock = clone.querySelector('.rule-block');
@@ -81,6 +92,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     const fieldsContainer = clone.querySelector('.fields-container');
     const delRuleBtn = clone.querySelector('.delete-rule-btn');
     const pickPreBtn = clone.querySelector('.pick-pre-btn');
+
+    // New header and control elements
+    const headerTitle = clone.querySelector('.rule-header-title');
+    const ruleHeader = clone.querySelector('.rule-header');
+    const ruleContent = clone.querySelector('.rule-content');
+    const toggleIcon = clone.querySelector('.toggle-icon');
+    const copyRuleBtn = clone.querySelector('.copy-rule-btn');
 
     pickPreBtn.addEventListener('click', () => {
       startPicking(preSelectorInput, urlInput.value.trim());
@@ -104,6 +122,35 @@ document.addEventListener('DOMContentLoaded', async () => {
     } else {
       addFieldToRuleUI(fieldsContainer, {});
     }
+
+    // Dynamic Header Title
+    function updateHeader() {
+      const n = nameInput.value.trim() || '新规则';
+      const u = urlInput.value.trim();
+      headerTitle.textContent = u ? `${n} (${u})` : n;
+    }
+    nameInput.addEventListener('input', updateHeader);
+    urlInput.addEventListener('input', updateHeader);
+    updateHeader(); // Initial call
+
+    // Collapse/Expand functionality
+    ruleHeader.addEventListener('click', () => {
+      ruleContent.classList.toggle('hidden');
+      if (ruleContent.classList.contains('hidden')) {
+        toggleIcon.classList.remove('rotate-180');
+      } else {
+        toggleIcon.classList.add('rotate-180');
+      }
+    });
+
+    // Copy functionality
+    copyRuleBtn.addEventListener('click', (e) => {
+      e.stopPropagation(); // prevent header toggle
+      const currentData = getRuleDataFromElement(ruleBlock);
+      currentData.name = currentData.name ? currentData.name + ' (副本)' : '新规则 (副本)';
+      addRuleToUI(currentData);
+      showToast('已复制规则：' + currentData.name);
+    });
 
     addFieldBtn.addEventListener('click', () => {
       addFieldToRuleUI(fieldsContainer, {});
