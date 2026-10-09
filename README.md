@@ -31,7 +31,7 @@
 3. 开启右上角的 **“开发者模式”**。
 4. 点击 **“加载已解压的扩展程序”**，选择本项目的**根目录**（即包含 `manifest.json` 的目录，**不要**选 `dist` 或其它子目录）。
 
-> 💡 **修改样式后需要重新编译**：如果你改动了 `src/styles.css` 或 `tailwind.config.js`，请运行：
+> 💡 **修改样式后需要重新编译**：本项目使用 **Tailwind CSS v4**（需 **Node.js 20+**）。如果你改动了 `src/styles.css` 或 `tailwind.config.js`，请运行：
 > ```bash
 > npm install
 > npm run build   # 一次性编译；开发时可用 npm run watch 开启监听
