@@ -156,7 +156,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       addFieldToRuleUI(fieldsContainer, {});
     });
 
-    delRuleBtn.addEventListener('click', () => {
+    delRuleBtn.addEventListener('click', (e) => {
+      e.stopPropagation(); // prevent header toggle
       ruleBlock.remove();
     });
 
