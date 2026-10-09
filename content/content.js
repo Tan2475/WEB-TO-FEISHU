@@ -5,7 +5,12 @@ if (!window.__FEISHU_SCRAPER_INJECTED) {
 
   chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === 'START_PICKING') {
-      if (window.__FEISHU_PICKER_ACTIVE) return;
+      if (window.__FEISHU_PICKER_ACTIVE) {
+        // Already picking on this page: respond so the caller does not treat
+        // this as a missing content script and try to re-inject.
+        sendResponse({ success: false, error: 'Picker is already active on this page.' });
+        return;
+      }
       window.__FEISHU_PICKER_ACTIVE = true;
       
       const highlightOverlay = document.createElement('div');
@@ -57,6 +62,11 @@ if (!window.__FEISHU_SCRAPER_INJECTED) {
 
       document.addEventListener('mouseover', onOver, true);
       document.addEventListener('click', onClick, true);
+
+      // Acknowledge synchronously so the sender's callback receives a real
+      // response (no chrome.runtime.lastError). The picked selector is sent
+      // later via PICKED_SELECTOR once the user clicks an element.
+      sendResponse({ success: true, started: true });
       return;
     }
 

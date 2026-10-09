@@ -3,6 +3,12 @@
   "name": "Web to Feishu Scraper",
   "version": "1.0.0",
   "description": "Flexible web scraper to push arbitrary extracted data to Feishu Bitable.",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
   "permissions": [
     "storage",
     "activeTab",
@@ -24,7 +30,13 @@
   ],
   "action": {
     "default_popup": "popup/popup.html",
-    "default_title": "Scrape to Feishu"
+    "default_title": "Scrape to Feishu",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
   },
   "options_ui": {
     "page": "options/options.html",
