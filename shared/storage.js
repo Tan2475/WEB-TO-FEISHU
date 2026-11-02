@@ -5,7 +5,8 @@ const StorageKeys = {
   FEISHU_APP_ID: 'FEISHU_APP_ID',
   FEISHU_APP_SECRET: 'FEISHU_APP_SECRET',
   FEISHU_DB_URL: 'FEISHU_DB_URL',
-  SCRAPING_RULES: 'SCRAPING_RULES' // Array of rules
+  SCRAPING_RULES: 'SCRAPING_RULES', // Array of rules
+  TEMP_REGION_OVERRIDES: 'TEMP_REGION_OVERRIDES' // 临时区域覆盖：{ "规则名|url关键字": { 字段名: region } }
 };
 
 async function getStorageData(keys) {

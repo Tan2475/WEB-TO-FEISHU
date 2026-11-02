@@ -152,6 +152,7 @@
         </div>
         <div class="col-span-6 flex items-center space-x-2">
           <input type="text" class="field-selector flex-1 min-w-0 px-3 py-2 text-sm bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-purple-500 outline-hidden transition font-mono" placeholder="CSS选择器，例如：a.profile-link">
+          <input type="hidden" class="field-region">
           <button type="button" class="pick-field-btn shrink-0 bg-purple-50 text-purple-700 hover:bg-purple-100 border border-purple-200 px-3 py-2 rounded-lg transition text-sm font-medium whitespace-nowrap" title="在网页上点击选取目标元素">🎯 拾取</button>
         </div>
         <div class="col-span-3">
@@ -162,6 +163,7 @@
             <option value="html">提取内部HTML</option>
             <option value="value">提取表单值 (value)</option>
             <option value="current_url">当前页面 URL (不使用选择器)</option>
+            <option value="screenshot">截取指定区域截图</option>
           </select>
         </div>
       </div>
