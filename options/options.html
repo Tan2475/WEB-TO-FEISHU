@@ -6,6 +6,98 @@
   <link rel="stylesheet" href="../dist/tailwind.css">
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+
+    /* 导入导出模态：手写样式，不依赖 Tailwind 产物，避免改完页面还要重新构建 */
+    .cfg-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(17, 24, 39, 0.55);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      z-index: 60;
+    }
+    .cfg-overlay[hidden] { display: none; }
+    .cfg-modal {
+      background: #fff;
+      border-radius: 16px;
+      width: 100%;
+      max-width: 460px;
+      padding: 24px;
+      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.25);
+      max-height: 90vh;
+      overflow-y: auto;
+    }
+    .cfg-title {
+      font-size: 18px;
+      font-weight: 700;
+      color: #111827;
+      margin: 0 0 12px;
+    }
+    .cfg-meta {
+      font-size: 13px;
+      line-height: 1.7;
+      color: #4b5563;
+      margin: 0 0 12px;
+      word-break: break-all;
+    }
+    .cfg-check {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 12px;
+      border: 1px solid #e5e7eb;
+      border-radius: 10px;
+      cursor: pointer;
+      transition: border-color .15s, background-color .15s;
+    }
+    .cfg-check:hover { border-color: #d1d5db; }
+    .cfg-check:has(input:checked) { border-color: #f59e0b; background: #fffbeb; }
+    .cfg-check input { margin-top: 3px; flex-shrink: 0; }
+    .cfg-check strong { display: block; font-size: 14px; color: #111827; font-weight: 600; }
+    .cfg-check-desc { display: block; font-size: 12px; line-height: 1.6; color: #6b7280; margin-top: 2px; }
+    .cfg-check.is-disabled { opacity: .55; cursor: not-allowed; }
+    .cfg-file {
+      font-size: 12px;
+      color: #6b7280;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      margin: 10px 0 0;
+      word-break: break-all;
+    }
+    .cfg-warn {
+      background: #fffbeb;
+      border: 1px solid #fde68a;
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-size: 12px;
+      line-height: 1.7;
+      color: #92400e;
+      margin: 0 0 12px;
+    }
+    .cfg-warn[hidden] { display: none; }
+    .cfg-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 20px;
+    }
+    .cfg-btn {
+      font-size: 14px;
+      font-weight: 500;
+      padding: 8px 16px;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background-color .15s, border-color .15s;
+      font-family: inherit;
+    }
+    .cfg-btn-ghost { background: #fff; border: 1px solid #d1d5db; color: #374151; }
+    .cfg-btn-ghost:hover { background: #f9fafb; }
+    .cfg-btn-primary { background: #111827; border: 1px solid #111827; color: #fff; }
+    .cfg-btn-primary:hover { background: #000; }
+    .cfg-btn-primary:disabled { opacity: .5; cursor: not-allowed; }
+    .cfg-btn-danger { background: #dc2626; border: 1px solid #dc2626; color: #fff; }
+    .cfg-btn-danger:hover { background: #b91c1c; }
   </style>
 </head>
 <body class="bg-gray-50 min-h-screen p-8 text-gray-800">
@@ -14,9 +106,13 @@
     <!-- Header -->
     <header class="flex items-center space-x-4">
       <div class="w-12 h-12 bg-blue-600 text-white rounded-xl flex items-center justify-center text-2xl shadow-lg">🚀</div>
-      <div>
+      <div class="min-w-0">
         <h1 class="text-3xl font-bold text-gray-900">推送到飞书 - 抓取配置</h1>
         <p class="text-gray-500 mt-1">配置飞书 API 与各个网站的字段抓取规则</p>
+      </div>
+      <div class="ml-auto flex items-center space-x-2 shrink-0">
+        <button id="exportConfigBtn" type="button" class="bg-white border border-gray-300 text-gray-700 hover:bg-gray-100 px-4 py-2 rounded-lg text-sm font-medium transition shadow-xs" title="把当前配置导出为 JSON 文件">⬇ 导出配置</button>
+        <button id="importConfigBtn" type="button" class="bg-white border border-gray-300 text-gray-700 hover:bg-gray-100 px-4 py-2 rounded-lg text-sm font-medium transition shadow-xs" title="从 JSON 文件恢复配置">⬆ 导入配置</button>
       </div>
     </header>
 
@@ -61,6 +157,47 @@
       </div>
     </section>
   </div>
+
+  <!-- 导出配置模态 -->
+  <div id="exportModal" class="cfg-overlay" hidden>
+    <div class="cfg-modal" role="dialog" aria-modal="true" aria-labelledby="exportModalTitle">
+      <h3 id="exportModalTitle" class="cfg-title">导出配置</h3>
+      <p id="exportSummary" class="cfg-meta">正在统计…</p>
+
+      <label id="exportCredentialRow" class="cfg-check">
+        <input type="checkbox" id="includeCredentials">
+        <span>
+          <strong>包含飞书凭证</strong>
+          <span id="exportCredentialDesc" class="cfg-check-desc">勾选后文件内会写入 App ID / App Secret 明文，等同于密码，请勿外发或提交到代码仓库。</span>
+        </span>
+      </label>
+
+      <p id="exportFilenameHint" class="cfg-file"></p>
+
+      <div class="cfg-actions">
+        <button type="button" class="cfg-btn cfg-btn-ghost" data-close="exportModal">取消</button>
+        <button type="button" id="confirmExportBtn" class="cfg-btn cfg-btn-primary">下载配置文件</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 导入配置模态 -->
+  <div id="importModal" class="cfg-overlay" hidden>
+    <div class="cfg-modal" role="dialog" aria-modal="true" aria-labelledby="importModalTitle">
+      <h3 id="importModalTitle" class="cfg-title">导入配置</h3>
+      <p id="importMeta" class="cfg-meta"></p>
+      <div id="importWarnings" class="cfg-warn" hidden></div>
+      <p class="cfg-meta">「覆盖」会清空当前全部规则；「追加」保留现有规则并在其后添加，重名会自动加后缀。</p>
+
+      <div class="cfg-actions">
+        <button type="button" class="cfg-btn cfg-btn-ghost" data-close="importModal">取消</button>
+        <button type="button" id="confirmAppendBtn" class="cfg-btn cfg-btn-ghost">追加导入</button>
+        <button type="button" id="confirmReplaceBtn" class="cfg-btn cfg-btn-danger">覆盖导入</button>
+      </div>
+    </div>
+  </div>
+
+  <input type="file" id="importFileInput" accept="application/json,.json" hidden>
 
   <!-- Toast Notification -->
   <div id="toast" class="fixed bottom-6 right-6 translate-y-20 opacity-0 transition-all duration-300 bg-gray-900 text-white px-6 py-3 rounded-xl shadow-2xl flex items-center space-x-3 pointer-events-none z-50">
@@ -174,6 +311,7 @@
   </template>
 
   <script src="../shared/storage.js"></script>
+  <script src="../shared/config-io.js"></script>
   <script src="options.js"></script>
 </body>
 </html>

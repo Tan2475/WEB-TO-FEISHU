@@ -12,6 +12,25 @@ document.addEventListener('DOMContentLoaded', async () => {
   const toast = document.getElementById('toast');
   const toastMessage = document.getElementById('toastMessage');
 
+  // 导入导出相关元素
+  const exportConfigBtn = document.getElementById('exportConfigBtn');
+  const importConfigBtn = document.getElementById('importConfigBtn');
+  const exportModal = document.getElementById('exportModal');
+  const importModal = document.getElementById('importModal');
+  const importFileInput = document.getElementById('importFileInput');
+  const includeCredentialsEl = document.getElementById('includeCredentials');
+  const exportCredentialRow = document.getElementById('exportCredentialRow');
+  const exportCredentialDesc = document.getElementById('exportCredentialDesc');
+  const exportSummaryEl = document.getElementById('exportSummary');
+  const exportFilenameHintEl = document.getElementById('exportFilenameHint');
+  const importMetaEl = document.getElementById('importMeta');
+  const importWarningsEl = document.getElementById('importWarnings');
+  const confirmExportBtn = document.getElementById('confirmExportBtn');
+  const confirmAppendBtn = document.getElementById('confirmAppendBtn');
+  const confirmReplaceBtn = document.getElementById('confirmReplaceBtn');
+
+  let pendingImport = null; // 已校验通过、等待用户选择合并策略的导入结果
+
   let activePickerInput = null; // 正在等待元素拾取结果的选择器输入框
   let activeRegionTarget = null; // 正在等待区域框选结果的字段上下文
   let incompleteScreenshotCount = 0; // 本次保存中被丢弃的未框选截图字段数
@@ -20,6 +39,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const data = await getStorageData([
     StorageKeys.FEISHU_APP_ID,
     StorageKeys.FEISHU_APP_SECRET,
+    StorageKeys.FEISHU_DB_URL,
     StorageKeys.SCRAPING_RULES
   ]);
 
@@ -27,30 +47,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (data[StorageKeys.FEISHU_APP_SECRET]) appSecretEl.value = data[StorageKeys.FEISHU_APP_SECRET];
 
   const rules = data[StorageKeys.SCRAPING_RULES] || [];
-  if (rules.length === 0) {
-    // Add an empty default rule to guide users
-    addRuleToUI({});
-  } else {
-    rules.forEach(r => addRuleToUI(r));
-  }
+  renderRules(rules);
 
   // Handle Save
   saveGlobalBtn.addEventListener('click', async () => {
-    // Collect rules
     incompleteScreenshotCount = 0;
-    const rulesToSave = [];
-    document.querySelectorAll('.rule-block').forEach(ruleBlock => {
-      const data = getRuleDataFromElement(ruleBlock);
-      if (data.url || data.fields.length > 0) {
-        rulesToSave.push({
-          name: data.name || "未命名规则",
-          url: data.url,
-          preSelector: data.preSelector,
-          preType: data.preType,
-          fields: data.fields
-        });
-      }
-    });
+    const rulesToSave = collectRulesFromUI();
 
     await setStorageData({
       [StorageKeys.FEISHU_APP_ID]: appIdEl.value.trim(),
@@ -71,6 +73,36 @@ document.addEventListener('DOMContentLoaded', async () => {
   addRuleBtn.addEventListener('click', () => {
     addRuleToUI({});
   });
+
+  // ==== 规则容器渲染 ====
+  function renderRules(ruleList) {
+    rulesContainer.textContent = '';
+    const list = Array.isArray(ruleList) ? ruleList : [];
+    if (list.length === 0) {
+      // 无规则时留一个空块，避免页面空白无从下手
+      addRuleToUI({});
+      return;
+    }
+    list.forEach(r => addRuleToUI(r));
+  }
+
+  // ==== 从当前表单收集规则（导出与保存共用） ====
+  function collectRulesFromUI() {
+    const collected = [];
+    document.querySelectorAll('.rule-block').forEach(ruleBlock => {
+      const data = getRuleDataFromElement(ruleBlock);
+      if (data.url || data.fields.length > 0) {
+        collected.push({
+          name: data.name || '未命名规则',
+          url: data.url,
+          preSelector: data.preSelector,
+          preType: data.preType,
+          fields: data.fields
+        });
+      }
+    });
+    return collected;
+  }
 
   function getRuleDataFromElement(ruleBlock) {
     const name = ruleBlock.querySelector('.rule-name').value.trim();
@@ -391,6 +423,201 @@ document.addEventListener('DOMContentLoaded', async () => {
       activeRegionTarget = null;
       await focusOptionsTab();
     }
+  });
+
+  // ==== 配置导出 / 导入 ====
+  exportConfigBtn.addEventListener('click', () => {
+    const currentRules = collectRulesFromUI();
+    const fieldTotal = currentRules.reduce((sum, r) => sum + r.fields.length, 0);
+    exportSummaryEl.textContent =
+      `将导出 ${currentRules.length} 条规则、共 ${fieldTotal} 个字段。数据取自当前页面，包含尚未保存的修改。`;
+
+    const hasCredentials = !!(appIdEl.value.trim() && appSecretEl.value.trim());
+    includeCredentialsEl.checked = false;
+    if (hasCredentials) {
+      exportCredentialRow.classList.remove('is-disabled');
+      includeCredentialsEl.disabled = false;
+      exportCredentialDesc.textContent =
+        '勾选后文件内会写入 App ID / App Secret 明文，等同于密码，请勿外发或提交到代码仓库。';
+    } else {
+      exportCredentialRow.classList.add('is-disabled');
+      includeCredentialsEl.disabled = true;
+      exportCredentialDesc.textContent = '当前未填写 App ID / App Secret，无法导出凭证。';
+    }
+
+    updateExportFilenameHint();
+    exportModal.hidden = false;
+  });
+
+  includeCredentialsEl.addEventListener('change', updateExportFilenameHint);
+
+  function updateExportFilenameHint() {
+    const preview = buildConfigPayload({ includeCredentials: includeCredentialsEl.checked });
+    exportFilenameHintEl.textContent = `文件名：${buildConfigFilename(preview)}`;
+  }
+
+  confirmExportBtn.addEventListener('click', () => {
+    const payload = buildConfigPayload({
+      appId: appIdEl.value,
+      appSecret: appSecretEl.value,
+      targetUrl: data[StorageKeys.FEISHU_DB_URL] || '',
+      rules: collectRulesFromUI(),
+      includeCredentials: includeCredentialsEl.checked,
+      extensionVersion: chrome.runtime.getManifest().version
+    });
+
+    downloadJsonFile(payload, buildConfigFilename(payload));
+    closeOverlay(exportModal);
+    showToast(`已导出 ${payload.rules.length} 条规则${payload.includesCredentials ? '（含凭证）' : ''}`);
+  });
+
+  function downloadJsonFile(payload, filename) {
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    // 立即 revoke 可能导致部分浏览器中断下载，留出缓冲
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  }
+
+  importConfigBtn.addEventListener('click', () => {
+    importFileInput.value = '';
+    importFileInput.click();
+  });
+
+  importFileInput.addEventListener('change', async () => {
+    const file = importFileInput.files && importFileInput.files[0];
+    if (!file) return;
+
+    let raw;
+    try {
+      raw = JSON.parse(await file.text());
+    } catch (e) {
+      alert(`无法解析该文件，内容不是合法 JSON：\n${e.message}`);
+      return;
+    }
+
+    const result = validateConfigPayload(raw);
+    if (!result.ok) {
+      alert(`导入失败：${result.error}`);
+      return;
+    }
+
+    pendingImport = { filename: file.name, ...result };
+    renderImportModal();
+    importModal.hidden = false;
+  });
+
+  function renderImportModal() {
+    if (!pendingImport) return;
+    const { filename, payload, stats, warnings } = pendingImport;
+    const currentRules = collectRulesFromUI();
+
+    let exportedAtText = '未知';
+    if (payload.exportedAt) {
+      const parsed = new Date(payload.exportedAt);
+      if (!Number.isNaN(parsed.getTime())) exportedAtText = parsed.toLocaleString('zh-CN');
+    }
+
+    const lines = [
+      `文件：${filename}`,
+      `导出时间：${exportedAtText}`,
+      `来源扩展版本：${payload.extensionVersion || '未知'}`,
+      `包含：${stats.rules} 条规则 / ${stats.fields} 个字段（其中截图字段 ${stats.screenshotFields} 个）`,
+      `凭证：${payload.credentials ? '含 App ID 与 App Secret，覆盖导入时会一并写入' : '不含凭证'}`,
+      `当前页面已有：${currentRules.length} 条规则`
+    ];
+
+    importMetaEl.textContent = '';
+    lines.forEach((line) => {
+      const div = document.createElement('div');
+      div.textContent = line;
+      importMetaEl.appendChild(div);
+    });
+
+    if (warnings && warnings.length > 0) {
+      importWarningsEl.textContent = '';
+      const head = document.createElement('div');
+      head.textContent = '以下内容被调整：';
+      importWarningsEl.appendChild(head);
+      warnings.forEach((w) => {
+        const div = document.createElement('div');
+        div.textContent = `· ${w}`;
+        importWarningsEl.appendChild(div);
+      });
+      importWarningsEl.hidden = false;
+    } else {
+      importWarningsEl.hidden = true;
+    }
+  }
+
+  confirmAppendBtn.addEventListener('click', () => applyPendingImport('append'));
+  confirmReplaceBtn.addEventListener('click', () => applyPendingImport('replace'));
+
+  async function applyPendingImport(strategy) {
+    if (!pendingImport) return;
+
+    const { payload } = pendingImport;
+    const mergedRules = mergeConfigRules(collectRulesFromUI(), payload.rules, strategy);
+
+    const updates = {
+      [StorageKeys.SCRAPING_RULES]: mergedRules,
+      // 规则整体变更后，旧的临时区域覆盖不再适用
+      [StorageKeys.TEMP_REGION_OVERRIDES]: {}
+    };
+
+    if (strategy === 'replace' && payload.credentials) {
+      updates[StorageKeys.FEISHU_APP_ID] = payload.credentials.appId;
+      updates[StorageKeys.FEISHU_APP_SECRET] = payload.credentials.appSecret;
+      appIdEl.value = payload.credentials.appId;
+      appSecretEl.value = payload.credentials.appSecret;
+      data[StorageKeys.FEISHU_APP_ID] = payload.credentials.appId;
+      data[StorageKeys.FEISHU_APP_SECRET] = payload.credentials.appSecret;
+
+      if (payload.targetUrl) {
+        updates[StorageKeys.FEISHU_DB_URL] = payload.targetUrl;
+        data[StorageKeys.FEISHU_DB_URL] = payload.targetUrl;
+      }
+    }
+
+    await setStorageData(updates);
+    renderRules(mergedRules);
+
+    const importedCount = payload.rules.length;
+    pendingImport = null;
+    closeOverlay(importModal);
+
+    showToast(
+      strategy === 'replace'
+        ? `已覆盖为 ${importedCount} 条规则${payload.credentials ? '，凭证已同步' : ''}`
+        : `已追加 ${importedCount} 条规则，当前共 ${mergedRules.length} 条`
+    );
+  }
+
+  function closeOverlay(overlay) {
+    if (!overlay) return;
+    overlay.hidden = true;
+    if (overlay === importModal) pendingImport = null;
+  }
+
+  document.querySelectorAll('[data-close]').forEach((btn) => {
+    btn.addEventListener('click', () => closeOverlay(document.getElementById(btn.dataset.close)));
+  });
+
+  [exportModal, importModal].forEach((overlay) => {
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) closeOverlay(overlay);
+    });
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (!exportModal.hidden) closeOverlay(exportModal);
+    if (!importModal.hidden) closeOverlay(importModal);
   });
 
   function showToast(msg) {
