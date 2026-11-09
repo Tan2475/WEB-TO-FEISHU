@@ -292,8 +292,8 @@ if (!window.__FEISHU_SCRAPER_INJECTED) {
     resetShadowRootCache();
   }
 
-  function queryVisibleField(selector) {
-    const visible = el => el && (!el.getClientRects || (el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden'));
+  function queryVisibleField(selector, accept = () => true) {
+    const visible = el => el && (!el.getClientRects || (el.getClientRects().length > 0 && getComputedStyle(el).visibility === 'visible')) && accept(el);
     const first = deepQuery(selector);
     if (visible(first)) return first;
     for (const root of [document, ...getShadowRoots()]) {
@@ -305,21 +305,49 @@ if (!window.__FEISHU_SCRAPER_INJECTED) {
     return null;
   }
 
-  /**
-   * 轮询等待字段出现，代替固定死等。
-   * 超时后做一次 shadow DOM 穿透兜底，返回仍未找到的选择器。
-   */
-  async function waitForSelectors(selectors, timeout, visibleOnly = false) {
-    if (!selectors || selectors.length === 0) return [];
+  function findPreActionTarget(selector, type) {
+    return queryVisibleField(selector, el => el.isConnected !== false &&
+      (type !== 'click' || !el.closest?.(':disabled, [aria-disabled="true"], [inert]')));
+  }
+
+  async function waitForPreActionTarget(selector, type) {
+    const deadline = Date.now() + 3000;
+    for (;;) {
+      resetShadowRootCache();
+      const target = findPreActionTarget(selector, type);
+      if (target || Date.now() >= deadline) return target;
+      await sleep(200);
+    }
+  }
+
+  function readFieldValue(el, type) {
+    switch (type) {
+      case 'href': return el.href || el.getAttribute('href');
+      case 'src': return el.src || el.getAttribute('src');
+      case 'html': return el.innerHTML;
+      case 'value': return el.value;
+      default: return (el.innerText || el.textContent)?.trim() || null;
+    }
+  }
+
+  const hasFieldValue = value => value != null && (typeof value !== 'string' || value.trim() !== '');
+
+  async function waitForFields(fields, timeout, visibleOnly, requireValue) {
+    if (!fields.length) return [];
 
     const deadline = Date.now() + timeout;
+    const findMissing = query => fields.filter(field => {
+      const el = query(field.selector);
+      return !el || (requireValue && !hasFieldValue(readFieldValue(el, field.type)));
+    });
+    const query = visibleOnly ? queryVisibleField : requireValue ? deepQuery : safeQuery;
     for (;;) {
-      const missing = selectors.filter((sel) => !(visibleOnly ? queryVisibleField(sel) : safeQuery(sel)));
+      const missing = findMissing(query);
       if (missing.length === 0) return [];
       if (Date.now() >= deadline) {
         // 等待期间可能新增 Web Component，不能沿用预交互前的根节点列表。
         resetShadowRootCache();
-        return selectors.filter((sel) => !(visibleOnly ? queryVisibleField(sel) : deepQuery(sel)));
+        return findMissing(visibleOnly ? queryVisibleField : deepQuery);
       }
       await sleep(100);
     }
@@ -829,39 +857,41 @@ if (!window.__FEISHU_SCRAPER_INJECTED) {
 
           await activateRuleTab(rule.tabSelector);
 
-          const selectorFields = rule.fields.filter((f) => f.type !== 'screenshot' && f.selector);
-          const selectors = [...new Set(selectorFields.map((f) => f.selector))];
+          const selectorFields = rule.fields.filter(f => f.type !== 'screenshot' && f.type !== 'current_url' && f.selector);
+          const visibleOnly = !!rule.tabSelector;
 
           // 本次提取的 DOM 可能已变化，shadow root 缓存重新采集
           resetShadowRootCache();
 
           // 1. 预交互：把「悬停/点击才出现」的节点先唤醒
           let preActed = false;
+          let preActionWarning;
           if (rule.preSelector && rule.preType) {
-            const preEl = deepQuery(rule.preSelector);
+            const preEl = await waitForPreActionTarget(rule.preSelector, rule.preType);
             if (preEl) {
               console.log(`[Scraper] Pre-action: ${rule.preType} on ${rule.preSelector}`);
               runPreAction(preEl, rule.preType);
               preActed = true;
               await sleep(500);
+              resetShadowRootCache();
             } else {
-              console.log(`[Scraper] Pre-action element not found: ${rule.preSelector}`);
+              preActionWarning = '预交互元素未就绪，已跳过预交互。';
             }
           }
 
           // 2. 等字段真正出现，而不是死等固定时长
           // 点击取消补触发后，仍保留原来两轮等待的总时长，兼容慢加载弹层。
           const waitTimeout = preActed ? (rule.preType === 'click' ? 3300 : 1800) : 1200;
-          let missingSelectors = selectors.length ? await waitForSelectors(selectors, waitTimeout, !!rule.tabSelector) : [];
+          const missing = await waitForFields(selectorFields, waitTimeout, visibleOnly, preActed);
 
           // 3. 悬停可补触发一次；点击型开关重复点击可能关闭刚打开的弹层。
-          if (missingSelectors.length > 0 && preActed && rule.preType === 'hover') {
-            console.log(`[Scraper] Retry pre-action, still missing ${missingSelectors.length} selector(s)`);
-            const preEl = deepQuery(rule.preSelector);
+          if (missing.length > 0 && preActed && rule.preType === 'hover') {
+            console.log(`[Scraper] Retry pre-action, still missing ${missing.length} field(s)`);
+            const preEl = findPreActionTarget(rule.preSelector, rule.preType);
             if (preEl) {
               runPreAction(preEl, rule.preType);
               await sleep(300);
-              missingSelectors = await waitForSelectors(missingSelectors, 1200, !!rule.tabSelector);
+              await waitForFields(missing, 1200, visibleOnly, true);
             }
           }
 
@@ -882,28 +912,12 @@ if (!window.__FEISHU_SCRAPER_INJECTED) {
             if (field.type === 'current_url') {
               value = window.location.href;
             } else if (field.selector) {
-              const el = rule.tabSelector ? queryVisibleField(field.selector) : deepQuery(field.selector);
+              const el = visibleOnly ? queryVisibleField(field.selector) : deepQuery(field.selector);
               if (el) {
-                switch (field.type) {
-                  case 'text':
-                    value = el.innerText || el.textContent;
-                    value = value ? value.trim() : null;
-                    break;
-                  case 'href':
-                    value = el.href || el.getAttribute('href');
-                    break;
-                  case 'src':
-                    value = el.src || el.getAttribute('src');
-                    break;
-                  case 'html':
-                    value = el.innerHTML;
-                    break;
-                  case 'value':
-                    value = el.value;
-                    break;
-                  default:
-                    value = el.innerText || el.textContent;
-                    value = value ? value.trim() : null;
+                value = readFieldValue(el, field.type);
+                if (preActed && !hasFieldValue(value)) {
+                  value = null;
+                  missingFields.push(field.name);
                 }
               } else {
                 missingFields.push(field.name);
@@ -916,7 +930,7 @@ if (!window.__FEISHU_SCRAPER_INJECTED) {
           });
 
           console.log('[Scraper] Extracted Data:', extractedData, 'missing:', missingFields);
-          sendResponse({ success: true, data: extractedData, missing: missingFields });
+          sendResponse({ success: true, data: extractedData, missing: missingFields, preActionWarning });
         } catch (e) {
           console.error('[Scraper] Extraction Error:', e);
           sendResponse({ error: e.message || 'Unknown Error' });

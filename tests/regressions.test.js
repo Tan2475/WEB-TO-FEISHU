@@ -114,21 +114,28 @@ test('imported dimensions must remain positive finite numbers after rounding', (
   assert.equal(context.normalizeRegion({ width: 50, height: 50, docX: 0, docY: 0 }).docX, 0);
 });
 
-function contentClient({ shadow = false, lateRoot = false, revealAt = 1000 } = {}) {
+function contentClient({ shadow = false, lateRoot = false, revealAt = 1000, preAt = 0, enabledAt = 0, fieldAt = null } = {}) {
   let listener, clock = 0, clicks = 0, hovers = 0, opened = false, added = false;
   const pre = {
     getBoundingClientRect: () => ({ left: 0, top: 0, width: 20, height: 20 }),
+    getClientRects: () => [{}],
+    closest: () => clock < enabledAt ? pre : null,
     dispatchEvent(event) { if (event.type === 'mouseover') hovers++; },
-    click() { clicks++; opened = !opened; if (!lateRoot) added = true; }
+    click() { clicks++; if (clock < enabledAt) return; opened = !opened; if (!lateRoot) added = true; }
   };
-  const root1 = { querySelector: s => s === '#pre' ? pre : null, querySelectorAll: () => [] };
+  const root1 = { querySelector: s => s === '#pre' && clock >= preAt ? pre : null, querySelectorAll: () => [] };
   const root2 = { querySelector: s => opened && s === '#field' ? { innerText: '已加载' } : null, querySelectorAll: () => [] };
   const context = load('content/content.js', {
     window: { location: { href: 'https://example.com' } },
     document: {
-      querySelector: s => !shadow && s === '#pre' ? pre : null,
+      querySelector: s => {
+        if (!shadow && s === '#pre' && clock >= preAt) return pre;
+        if (s === '#field' && fieldAt !== null) return { innerText: opened && clock >= fieldAt ? '已加载' : '' };
+        return null;
+      },
       querySelectorAll: () => shadow ? [{ shadowRoot: root1 }, ...(added ? [{ shadowRoot: root2 }] : [])] : []
     },
+    getComputedStyle: () => ({ visibility: 'visible' }),
     console: { log() {}, error() {} },
     chrome: { runtime: { onMessage: { addListener: fn => { listener = fn; } } } },
     Date: { now: () => clock },
@@ -137,7 +144,7 @@ function contentClient({ shadow = false, lateRoot = false, revealAt = 1000 } = {
   });
   return {
     extract: (preType = 'click') => new Promise(resolve => listener({ action: 'EXTRACT_DATA', rule: {
-      preSelector: '#pre', preType, fields: [{ name: '字段', selector: '#field', type: 'text' }]
+      preSelector: '#pre', preType, fields: [{ name: '字段', selector: '#field', type: 'text' }, { name: '来源', type: 'current_url' }]
     } }, {}, resolve)),
     state: () => ({ clicks, hovers, opened }), context
   };
@@ -155,6 +162,29 @@ test('missing fields never cause a second click that closes a toggle', async () 
   await client.extract();
   assert.equal(client.state().clicks, 1);
   assert.equal(client.state().opened, true);
+});
+
+test('pre-action waits for a late trigger and clicks it once after it is enabled', async () => {
+  const client = contentClient({ preAt: 700, enabledAt: 1100, fieldAt: 1300 });
+  const result = await client.extract();
+  assert.equal(result.data.字段, '已加载');
+  assert.equal(client.state().clicks, 1);
+});
+
+test('pre-action extraction waits for a present field to acquire its value', async () => {
+  const client = contentClient({ fieldAt: 1700 });
+  const result = await client.extract();
+  assert.equal(result.data.字段, '已加载');
+  assert.equal(client.state().clicks, 1);
+});
+
+test('unavailable pre-action is reported without discarding other extracted data', async () => {
+  const client = contentClient({ preAt: Infinity });
+  const result = await client.extract();
+  assert.equal(result.success, true);
+  assert.equal(result.data.来源, 'https://example.com');
+  assert.match(result.preActionWarning, /预交互/);
+  assert.equal(client.state().clicks, 0);
 });
 
 test('hover can still retry when fields are missing', async () => {

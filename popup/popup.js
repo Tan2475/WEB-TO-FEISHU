@@ -36,7 +36,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   function sendTabMessage(tabId, message) {
     return new Promise((resolve) => {
       const timer = setTimeout(() => resolve({ error: '等待页面响应超时，请刷新网页后重试。' }),
-        message.action === 'PREPARE_REGION' ? 45000 : 15000);
+        message.action === 'PREPARE_REGION' ? 45000 : 20000);
       chrome.tabs.sendMessage(tabId, message, (response) => {
         clearTimeout(timer);
         if (chrome.runtime.lastError) {
@@ -306,6 +306,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     extractedData = response.data || {};
     previewWarnings = [];
+    if (response.preActionWarning) previewWarnings.push(response.preActionWarning);
 
     // 文本字段没命中元素时明确说出来，否则用户只看到「未找到」无从排查
     if (Array.isArray(response.missing) && response.missing.length > 0) {
