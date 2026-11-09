@@ -1,0 +1,12 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>模块截图验证</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f5f6fa;font:15px/1.5 system-ui;color:#27272a;padding:40px}header{display:flex;align-items:center;gap:12px;margin-bottom:32px}h1{font-size:24px;flex:1}button{font:inherit;padding:9px 16px;background:white;border:1px solid #ddd;border-radius:9px;cursor:pointer}.grid{display:grid;grid-template-columns:1fr 1fr;gap:24px}.card{background:white;border:1px solid #e4e4e7;border-radius:18px;padding:28px;min-height:300px}.card h2{font-size:19px;font-weight:550;margin:0 0 30px}.chart{height:150px;display:flex;align-items:flex-end;justify-content:space-evenly;gap:20px;color:#71717a}.bar{width:12%;background:#409bfa;border-radius:6px 6px 0 0}.donut{border:35px solid #ff3983;border-right-color:#409bfa;border-radius:50%;width:155px;height:155px;margin:auto}.legend{text-align:center;color:#71717a;margin-top:20px}.below{height:600px;margin-top:24px}#result{white-space:pre-wrap;font-size:12px;color:#52525b}
+</style>
+<header><h1>连接用户画像</h1><button id="start">选择截图模块</button><button id="change">模拟布局变化</button><button id="prepare">验证截图位置</button></header>
+<main class="grid"><section class="card" id="gender"><h2>性别分布</h2><div class="donut"></div><div class="legend">男性 13.5%　　女性 86.5%</div></section><section class="card" id="age"><h2>年龄分布</h2><div class="chart"><div class="bar" style="height:60%"></div><div class="bar" style="height:90%"></div><div class="bar" style="height:70%"></div><div class="bar" style="height:20%"></div></div><div class="legend">18–23　　24–30　　31–40　　41+</div></section></main><pre id="result"></pre><div class="card below"><h2>地域分布</h2></div>
+<script>let listener, saved;
+window.chrome={runtime:{onMessage:{addListener(fn){listener=fn}},sendMessage(m){if(m.region)saved=m.region;document.querySelector('#result').textContent=JSON.stringify(m,null,2)}}};
+document.querySelector('#start').onclick=()=>listener({action:'START_MODULE_PICK'},{},()=>{});
+document.querySelector('#change').onclick=()=>{document.querySelector('main').style.marginTop='160px';document.querySelector('#gender').style.minHeight='420px';document.querySelector('#gender').id='changed-gender';};
+document.querySelector('#prepare').onclick=()=>listener({action:'PREPARE_REGION',region:saved},{},r=>document.querySelector('#result').textContent=JSON.stringify(r));
+</script><script src="/content/module-capture.js"></script><script src="/content/content.js"></script></html>

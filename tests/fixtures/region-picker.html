@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="UTF-8">
+<title>截图框选滚动验证</title>
+<style>
+body { margin: 0; padding: 32px; font: 16px/1.6 system-ui; background: #f5f6f8; color: #202632; }
+button { padding: 10px 18px; cursor: pointer; }
+.panel { height: 240px; overflow: auto; border: 1px solid #ccc; background: white; }
+.content { height: 1200px; padding: 20px; background: linear-gradient(white, #b9dbff); }
+.page-space { height: 1800px; margin-top: 30px; background: linear-gradient(#f5f6f8, #ccc); }
+</style>
+<h1>截图框选滚动验证</h1>
+<button id="start">开始框选</button>
+<button id="restore">验证恢复标签</button>
+<div role="tablist">
+  <button role="tab" id="overview" aria-selected="true">达人概览</button>
+  <button role="tab" id="connected" aria-selected="false">连接用户</button>
+</div>
+<p>内部滚动区域</p>
+<div class="panel"><div class="content">框选模式下滚动此处，应只移动该区域。</div></div>
+<p id="result" aria-live="polite"></p>
+<div class="page-space">页面滚动区域</div>
+<script>
+let regionListener;
+let lastRegion;
+window.chrome = { runtime: {
+  onMessage: { addListener(listener) { regionListener = listener; } },
+  sendMessage(message) {
+    if (message.region) lastRegion = message.region;
+    document.getElementById('result').textContent = JSON.stringify(message);
+  }
+} };
+document.getElementById('start').addEventListener('click', () => {
+  regionListener({ action: 'START_REGION_PICK' }, {}, () => {});
+});
+for (const tab of document.querySelectorAll('[role="tab"]')) {
+  tab.addEventListener('click', () => {
+    for (const other of document.querySelectorAll('[role="tab"]')) other.setAttribute('aria-selected', String(other === tab));
+    document.querySelector('.content').textContent = tab.textContent + '内容';
+  });
+}
+document.getElementById('restore').addEventListener('click', () => {
+  regionListener({ action: 'PREPARE_REGION', region: lastRegion }, {}, result => {
+    document.getElementById('result').textContent = JSON.stringify(result);
+  });
+});
+</script>
+<script src="../../content/content.js"></script>
+</html>

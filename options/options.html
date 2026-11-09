@@ -200,7 +200,7 @@
   <input type="file" id="importFileInput" accept="application/json,.json" hidden>
 
   <!-- Toast Notification -->
-  <div id="toast" class="fixed bottom-6 right-6 translate-y-20 opacity-0 transition-all duration-300 bg-gray-900 text-white px-6 py-3 rounded-xl shadow-2xl flex items-center space-x-3 pointer-events-none z-50">
+  <div id="toast" role="status" aria-live="polite" class="fixed bottom-6 right-6 translate-y-20 opacity-0 transition-all duration-300 bg-gray-900 text-white px-6 py-3 rounded-xl shadow-2xl flex items-center space-x-3 pointer-events-none z-[70]">
     <svg class="w-6 h-6 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
     <span id="toastMessage" class="font-medium">配置已保存！</span>
   </div>
@@ -234,6 +234,17 @@
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1.5">匹配 URL 关键字 <span class="text-xs text-gray-400 font-normal ml-1">例：xiaohongshu.com</span></label>
             <input type="text" class="rule-url w-full px-3 py-2 text-sm bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-purple-500 outline-hidden transition" placeholder="例如：xingtu.cn">
+          </div>
+        </div>
+        <div class="pt-4 border-t border-gray-100">
+          <label class="block text-sm font-medium text-gray-700 mb-1.5">匹配字段 <span class="text-xs text-gray-400 font-normal ml-1">选填，匹配到更新，未匹配则新增</span></label>
+          <input type="text" class="rule-match-field w-full px-3 py-2 text-sm bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-purple-500 outline-hidden transition" placeholder="填写下方已配置的飞书列名，例如：网页链接">
+        </div>
+        <div class="pt-4 border-t border-gray-100">
+          <label class="block text-sm font-medium text-gray-700 mb-1.5">目标页签 <span class="text-xs text-gray-400 font-normal ml-1">选填，抓取前切换</span></label>
+          <div class="flex items-center space-x-2">
+            <input type="text" class="rule-tab-selector flex-1 min-w-0 px-3 py-2 text-sm bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-purple-500 outline-hidden transition font-mono" placeholder="页签的 CSS 选择器，例如：#business-tab">
+            <button type="button" class="pick-tab-btn shrink-0 bg-purple-50 text-purple-700 hover:bg-purple-100 border border-purple-200 px-3 py-2 rounded-lg transition text-sm font-medium whitespace-nowrap" title="在网页上选取页签本身">🎯 拾取</button>
           </div>
         </div>
         <div class="pt-4 border-t border-gray-100 grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -300,7 +311,8 @@
             <option value="html">提取内部HTML</option>
             <option value="value">提取表单值 (value)</option>
             <option value="current_url">当前页面 URL (不使用选择器)</option>
-            <option value="screenshot">截取指定区域截图</option>
+            <option value="module_screenshot">模块截图</option>
+            <option value="screenshot">自由框选截图</option>
           </select>
         </div>
       </div>

@@ -3,7 +3,7 @@
 // 全部为纯函数，不依赖 DOM，便于在 options 页复用与后续单测。
 
 const CONFIG_SCHEMA = 'web-to-feishu-config';
-const CONFIG_SCHEMA_VERSION = 1;
+const CONFIG_SCHEMA_VERSION = 5;
 const CONFIG_FIELD_TYPES = ['text', 'href', 'src', 'html', 'value', 'current_url', 'screenshot'];
 
 /**
@@ -23,7 +23,11 @@ function buildConfigPayload(options) {
 
   const payload = {
     schema: CONFIG_SCHEMA,
-    schemaVersion: CONFIG_SCHEMA_VERSION,
+    // 模块截图、规则页签、截图页签恢复、匹配字段分别要求 v5 / v4 / v3 / v2。
+    schemaVersion: Array.isArray(rules) && rules.some(rule => rule.fields?.some(field => field.region?.mode === 'module'))
+      ? 5 : Array.isArray(rules) && rules.some(rule => typeof rule.tabSelector === 'string' && rule.tabSelector.trim())
+      ? 4 : Array.isArray(rules) && rules.some(rule => rule.fields?.some(field => field.region?.tabSelectors?.length))
+        ? 3 : Array.isArray(rules) && rules.some(rule => rule.matchField) ? 2 : 1,
     exportedAt: new Date().toISOString(),
     extensionVersion: extensionVersion || '',
     includesCredentials: !!includeCredentials,
@@ -56,34 +60,58 @@ function buildConfigFilename(payload, now) {
 }
 
 /** 区域配置是否可用：必须有大小的同时，锚点选择器或文档坐标至少有一个 */
+function isRegionNumber(value) {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function hasRegionDocCoords(region) {
+  return isRegionNumber(region.docX) && isRegionNumber(region.docY) && region.docX >= 0 && region.docY >= 0;
+}
+
 function isValidRegion(region) {
   if (!region || typeof region !== 'object') return false;
-  const width = Number(region.width);
-  const height = Number(region.height);
-  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return false;
+  if (region.tabSelectors !== undefined && (!Array.isArray(region.tabSelectors) || region.tabSelectors.length > 10 ||
+      region.tabSelectors.some(selector => typeof selector !== 'string' || !selector.trim()))) return false;
+  const { width, height } = region;
+  if (!isRegionNumber(width) || !isRegionNumber(height) || Math.round(width) < 1 || Math.round(height) < 1) return false;
+  if (region.mode === 'module') {
+    return Array.isArray(region.modules) && region.modules.length > 0 && region.modules.length <= 12 && region.modules.every(m =>
+      m && typeof m.selector === 'string' && m.selector.trim() && typeof m.title === 'string' && m.title.trim() && m.title.length <= 100 &&
+      typeof m.tag === 'string' && /^[A-Z][A-Z0-9-]*$/.test(m.tag) && Number.isInteger(m.headingDepth) && m.headingDepth >= 1 && m.headingDepth <= 30 &&
+      Array.isArray(m.classes) && m.classes.length <= 6 && m.classes.every(c => typeof c === 'string' && c.length > 0 && c.length < 128) &&
+      (m.scopeSelector === undefined || typeof m.scopeSelector === 'string'));
+  }
+  if (region.mode !== undefined && region.mode !== 'region') return false;
 
   const hasAnchor = typeof region.anchorSelector === 'string' && region.anchorSelector.trim() !== '';
-  const hasDocCoords = Number.isFinite(Number(region.docX)) && Number.isFinite(Number(region.docY));
+  const hasDocCoords = hasRegionDocCoords(region);
   return hasAnchor || hasDocCoords;
 }
 
 function normalizeRegion(region) {
   if (!isValidRegion(region)) return null;
+  if (region.mode === 'module') {
+    return { mode: 'module', modules: region.modules.map(m => ({ selector: m.selector.trim(), title: m.title.trim(), tag: m.tag,
+      classes: [...m.classes], headingDepth: m.headingDepth, ...(m.scopeSelector ? { scopeSelector: m.scopeSelector.trim() } : {}) })),
+      width: Math.round(region.width), height: Math.round(region.height),
+      ...(region.tabSelectors?.length ? { tabSelectors: region.tabSelectors.map(s => s.trim()) } : {}) };
+  }
 
   const normalized = {
-    anchorSelector: typeof region.anchorSelector === 'string' ? region.anchorSelector : '',
-    offsetX: Math.round(Number(region.offsetX) || 0),
-    offsetY: Math.round(Number(region.offsetY) || 0),
-    width: Math.round(Number(region.width)),
-    height: Math.round(Number(region.height)),
-    dpr: Number(region.dpr) > 0 ? Number(region.dpr) : 1
+    anchorSelector: typeof region.anchorSelector === 'string' ? region.anchorSelector.trim() : '',
+    offsetX: isRegionNumber(region.offsetX) ? Math.round(region.offsetX) : 0,
+    offsetY: isRegionNumber(region.offsetY) ? Math.round(region.offsetY) : 0,
+    width: Math.round(region.width),
+    height: Math.round(region.height),
+    dpr: isRegionNumber(region.dpr) && region.dpr > 0 ? region.dpr : 1
   };
 
   // docX / docY 是锚点失效时的兜底坐标，缺失时不补默认值，避免落到页面左上角
-  if (Number.isFinite(Number(region.docX)) && Number.isFinite(Number(region.docY))) {
-    normalized.docX = Math.round(Number(region.docX));
-    normalized.docY = Math.round(Number(region.docY));
+  if (hasRegionDocCoords(region)) {
+    normalized.docX = Math.round(region.docX);
+    normalized.docY = Math.round(region.docY);
   }
+  if (region.tabSelectors?.length) normalized.tabSelectors = region.tabSelectors.map(selector => selector.trim());
 
   return normalized;
 }
@@ -120,6 +148,18 @@ function normalizeCredentials(raw) {
   return { appId, appSecret };
 }
 
+function validateRuleMatchField(rule) {
+  if (rule.matchField == null || rule.matchField === '') return '';
+  if (typeof rule.matchField !== 'string') return '匹配字段必须为飞书列名。';
+  const name = rule.matchField.trim();
+  if (!name) return '';
+  const fields = (rule.fields || []).filter(field => field.name === name);
+  if (fields.length !== 1 || fields[0].type === 'screenshot') {
+    return `匹配字段「${name}」必须对应一个已配置的非截图字段。`;
+  }
+  return '';
+}
+
 /**
  * 校验并归一化导入的配置对象。
  * 返回 { ok:true, payload, stats, warnings } 或 { ok:false, error }
@@ -146,12 +186,19 @@ function validateConfigPayload(raw) {
   let fieldCount = 0;
   let screenshotFieldCount = 0;
   let droppedFields = 0;
+  let matchError = '';
+  let tabError = '';
 
   raw.rules.forEach((rawRule, ruleIndex) => {
     const label = `第 ${ruleIndex + 1} 条规则`;
 
     if (!rawRule || typeof rawRule !== 'object') {
       warnings.push(`${label}格式异常，已跳过。`);
+      return;
+    }
+
+    if (rawRule.tabSelector !== undefined && typeof rawRule.tabSelector !== 'string') {
+      tabError = tabError || `${label}的目标页签必须为 CSS 选择器字符串。`;
       return;
     }
 
@@ -177,14 +224,21 @@ function validateConfigPayload(raw) {
       return;
     }
 
-    rules.push({
+    const rule = {
       name,
       url,
+      tabSelector: typeof rawRule.tabSelector === 'string' ? rawRule.tabSelector.trim() : '',
+      matchField: typeof rawRule.matchField === 'string' ? rawRule.matchField.trim() : (rawRule.matchField ?? ''),
       preSelector: typeof rawRule.preSelector === 'string' ? rawRule.preSelector.trim() : '',
       preType: rawRule.preType === 'hover' || rawRule.preType === 'click' ? rawRule.preType : '',
       fields
-    });
+    };
+    matchError = matchError || validateRuleMatchField(rule);
+    rules.push(rule);
   });
+
+  if (tabError) return { ok: false, error: tabError };
+  if (matchError) return { ok: false, error: matchError };
 
   if (rules.length === 0) {
     return { ok: false, error: '文件里没有可用的抓取规则。' };
@@ -253,4 +307,5 @@ if (typeof self !== 'undefined') {
   self.isValidRegion = isValidRegion;
   self.validateConfigPayload = validateConfigPayload;
   self.mergeConfigRules = mergeConfigRules;
+  self.validateRuleMatchField = validateRuleMatchField;
 }

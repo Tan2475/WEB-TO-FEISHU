@@ -69,7 +69,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'PUSH_TO_FEISHU') {
     (async () => {
       try {
-        const { recordData, dbUrl, screenshots } = request;
+        const { recordData, dbUrl, screenshots, matchField } = request;
 
         // Retrieve settings
         const settings = await self.getStorageData([
@@ -88,7 +88,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           throw new Error('Feishu DB URL is required.');
         }
 
-        const result = await self.appendToFeishu(appId, appSecret, dbUrl, recordData, screenshots || {});
+        const result = await self.appendToFeishu(appId, appSecret, dbUrl, recordData, screenshots || {}, matchField || '');
         sendResponse({ success: true, result });
       } catch (e) {
         console.error('Failed to push to Feishu:', e);

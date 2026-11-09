@@ -11,6 +11,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const fieldTemplate = document.getElementById('fieldTemplate');
   const toast = document.getElementById('toast');
   const toastMessage = document.getElementById('toastMessage');
+  let toastTimer;
 
   // 导入导出相关元素
   const exportConfigBtn = document.getElementById('exportConfigBtn');
@@ -36,12 +37,18 @@ document.addEventListener('DOMContentLoaded', async () => {
   let incompleteScreenshotCount = 0; // 本次保存中被丢弃的未框选截图字段数
 
   // Load existing data
-  const data = await getStorageData([
-    StorageKeys.FEISHU_APP_ID,
-    StorageKeys.FEISHU_APP_SECRET,
-    StorageKeys.FEISHU_DB_URL,
-    StorageKeys.SCRAPING_RULES
-  ]);
+  let data;
+  try {
+    data = await getStorageData([
+      StorageKeys.FEISHU_APP_ID,
+      StorageKeys.FEISHU_APP_SECRET,
+      StorageKeys.FEISHU_DB_URL,
+      StorageKeys.SCRAPING_RULES
+    ]);
+  } catch (e) {
+    showToast('读取配置失败：' + e.message, true);
+    return;
+  }
 
   if (data[StorageKeys.FEISHU_APP_ID]) appIdEl.value = data[StorageKeys.FEISHU_APP_ID];
   if (data[StorageKeys.FEISHU_APP_SECRET]) appSecretEl.value = data[StorageKeys.FEISHU_APP_SECRET];
@@ -53,14 +60,24 @@ document.addEventListener('DOMContentLoaded', async () => {
   saveGlobalBtn.addEventListener('click', async () => {
     incompleteScreenshotCount = 0;
     const rulesToSave = collectRulesFromUI();
+    const matchError = rulesToSave.map(validateRuleMatchField).find(Boolean);
+    if (matchError) {
+      showToast(matchError, true);
+      return;
+    }
 
-    await setStorageData({
-      [StorageKeys.FEISHU_APP_ID]: appIdEl.value.trim(),
-      [StorageKeys.FEISHU_APP_SECRET]: appSecretEl.value.trim(),
-      [StorageKeys.SCRAPING_RULES]: rulesToSave,
-      // 规则一旦重新保存，弹窗侧的临时区域覆盖即失效，避免与最新配置冲突
-      [StorageKeys.TEMP_REGION_OVERRIDES]: {}
-    });
+    try {
+      await setStorageData({
+        [StorageKeys.FEISHU_APP_ID]: appIdEl.value.trim(),
+        [StorageKeys.FEISHU_APP_SECRET]: appSecretEl.value.trim(),
+        [StorageKeys.SCRAPING_RULES]: rulesToSave,
+        // 规则一旦重新保存，弹窗侧的临时区域覆盖即失效，避免与最新配置冲突
+        [StorageKeys.TEMP_REGION_OVERRIDES]: {}
+      });
+    } catch (e) {
+      showToast('保存失败：' + e.message, true);
+      return;
+    }
 
     if (incompleteScreenshotCount > 0) {
       showToast(`已保存，但有 ${incompleteScreenshotCount} 个截图字段未框选区域，暂不会执行`);
@@ -95,8 +112,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         collected.push({
           name: data.name || '未命名规则',
           url: data.url,
+          tabSelector: data.tabSelector,
           preSelector: data.preSelector,
           preType: data.preType,
+          matchField: data.matchField,
           fields: data.fields
         });
       }
@@ -107,8 +126,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   function getRuleDataFromElement(ruleBlock) {
     const name = ruleBlock.querySelector('.rule-name').value.trim();
     const url = ruleBlock.querySelector('.rule-url').value.trim();
+    const tabSelector = ruleBlock.querySelector('.rule-tab-selector').value.trim();
     const preSelector = ruleBlock.querySelector('.rule-pre-selector').value.trim();
     const preType = ruleBlock.querySelector('.rule-pre-type').value;
+    const matchField = ruleBlock.querySelector('.rule-match-field').value.trim();
 
     const fields = [];
     ruleBlock.querySelectorAll('.field-item').forEach(fieldItem => {
@@ -117,11 +138,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       const selector = fieldItem.querySelector('.field-selector').value.trim();
       const regionInput = fieldItem.querySelector('.field-region');
 
-      if (type === 'screenshot') {
+      if (type === 'screenshot' || type === 'module_screenshot') {
         const region = parseRegionValue(regionInput ? regionInput.value : '');
-        if (fieldName && region) {
+        if (fieldName && region && (region.mode === 'module') === (type === 'module_screenshot')) {
           // 截图字段不使用 CSS 选择器，区域配置单独保存
-          fields.push({ name: fieldName, selector: '', type, region });
+          fields.push({ name: fieldName, selector: '', type: 'screenshot', region });
         } else if (fieldName) {
           incompleteScreenshotCount++;
         }
@@ -132,7 +153,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         fields.push({ name: fieldName, selector, type });
       }
     });
-    return { name, url, preSelector, preType, fields };
+    return { name, url, tabSelector, preSelector, preType, matchField, fields };
   }
 
   function parseRegionValue(raw) {
@@ -148,6 +169,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   function describeRegion(region) {
     if (!region) return '';
+    if (region.mode === 'module') return region.modules.map(m => m.title).join(' + ');
     return `已框选 ${Math.round(region.width)} × ${Math.round(region.height)}`;
   }
 
@@ -156,12 +178,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     const ruleBlock = clone.querySelector('.rule-block');
     const nameInput = clone.querySelector('.rule-name');
     const urlInput = clone.querySelector('.rule-url');
+    const tabSelectorInput = clone.querySelector('.rule-tab-selector');
     const preSelectorInput = clone.querySelector('.rule-pre-selector');
     const preTypeSelect = clone.querySelector('.rule-pre-type');
+    const matchFieldInput = clone.querySelector('.rule-match-field');
     const addFieldBtn = clone.querySelector('.add-field-btn');
     const fieldsContainer = clone.querySelector('.fields-container');
     const delRuleBtn = clone.querySelector('.delete-rule-btn');
     const pickPreBtn = clone.querySelector('.pick-pre-btn');
+    const pickTabBtn = clone.querySelector('.pick-tab-btn');
 
     // New header and control elements
     const headerTitle = clone.querySelector('.rule-header-title');
@@ -173,6 +198,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     pickPreBtn.addEventListener('click', () => {
       startPicking(preSelectorInput, urlInput.value.trim());
     });
+    pickTabBtn.addEventListener('click', () => {
+      startPicking(tabSelectorInput, urlInput.value.trim());
+    });
+    tabSelectorInput.value = ruleData.tabSelector || '';
 
     if (ruleData.name) {
       nameInput.value = ruleData.name;
@@ -186,6 +215,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (ruleData.preType) {
       preTypeSelect.value = ruleData.preType;
     }
+    matchFieldInput.value = ruleData.matchField || '';
 
     if (ruleData.fields && ruleData.fields.length > 0) {
       ruleData.fields.forEach(f => addFieldToRuleUI(fieldsContainer, f));
@@ -246,15 +276,17 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     if (fieldData.name) nameInput.value = fieldData.name;
     if (fieldData.selector) selectorInput.value = fieldData.selector;
-    if (fieldData.type) typeSelect.value = fieldData.type;
+    if (fieldData.type) typeSelect.value = fieldData.region?.mode === 'module' ? 'module_screenshot' : fieldData.type;
     if (fieldData.region) regionInput.value = JSON.stringify(fieldData.region);
 
     const readRegion = () => parseRegionValue(regionInput.value);
 
     // 截图字段用只读文本回显已框选区域，普通字段则恢复为可编辑选择器输入框
     const syncRegionDisplay = () => {
-      if (typeSelect.value === 'screenshot') {
-        const text = describeRegion(readRegion()) || '尚未框选区域';
+      if (typeSelect.value === 'screenshot' || typeSelect.value === 'module_screenshot') {
+        const region = readRegion();
+        const sameMode = region && (region.mode === 'module') === (typeSelect.value === 'module_screenshot');
+        const text = (sameMode ? describeRegion(region) : '') || (typeSelect.value === 'module_screenshot' ? '尚未选择模块' : '尚未框选区域');
         selectorInput.value = text;
         selectorInput.dataset.regionText = text;
       } else if (selectorInput.dataset.regionText && selectorInput.value === selectorInput.dataset.regionText) {
@@ -272,14 +304,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         selectorInput.classList.add('opacity-50', 'bg-gray-100');
         selectorInput.placeholder = '当前页面URL无需选择器';
         if (pickFieldBtn) pickFieldBtn.classList.add('hidden');
-      } else if (type === 'screenshot') {
+      } else if (type === 'screenshot' || type === 'module_screenshot') {
         selectorInput.disabled = true;
         selectorInput.classList.add('opacity-50', 'bg-gray-100');
         selectorInput.placeholder = '区域截图无需选择器';
         if (pickFieldBtn) {
           pickFieldBtn.classList.remove('hidden');
-          pickFieldBtn.textContent = '🖼 框选区域';
-          pickFieldBtn.title = '在网页上拖拽框选要截图的区域';
+          pickFieldBtn.textContent = type === 'module_screenshot' ? '选择模块' : '框选区域';
+          pickFieldBtn.title = type === 'module_screenshot' ? '在网页上选择截图模块' : '在网页上拖拽框选要截图的区域';
         }
       } else {
         selectorInput.disabled = false;
@@ -309,8 +341,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         const ruleBlock = fieldItem.closest('.rule-block');
         const ruleUrl = ruleBlock ? ruleBlock.querySelector('.rule-url').value.trim() : '';
 
-        if (typeSelect.value === 'screenshot') {
-          startRegionPicking({ regionInput, selectorInput }, ruleUrl);
+        if (typeSelect.value === 'screenshot' || typeSelect.value === 'module_screenshot') {
+          startRegionPicking({ regionInput, selectorInput }, ruleUrl, typeSelect.value === 'module_screenshot');
         } else {
           startPicking(selectorInput, ruleUrl);
         }
@@ -361,22 +393,25 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // ==== Region Picker Logic ====
-  async function startRegionPicking(targets, urlKeyword) {
+  async function startRegionPicking(targets, urlKeyword, moduleMode = false) {
     const targetTab = await findTargetTab(urlKeyword);
     if (!targetTab) return;
 
     activeRegionTarget = targets;
 
-    chrome.tabs.sendMessage(targetTab.id, { action: 'START_REGION_PICK' }, (response) => {
+    const message = { action: moduleMode ? 'START_MODULE_PICK' : 'START_REGION_PICK' };
+    chrome.tabs.sendMessage(targetTab.id, message, (response) => {
       if (chrome.runtime.lastError) {
         // Needs injecting
         chrome.scripting.executeScript({
           target: { tabId: targetTab.id },
-          files: ['content/content.js']
+          files: ['content/module-capture.js', 'content/content.js']
         }, () => {
-          chrome.tabs.sendMessage(targetTab.id, { action: 'START_REGION_PICK' });
+          chrome.tabs.sendMessage(targetTab.id, message, result => {
+            if (chrome.runtime.lastError || result?.error) showToast(result?.error || chrome.runtime.lastError.message, true);
+          });
         });
-      }
+      } else if (response?.error) showToast(response.error, true);
     });
   }
 
@@ -392,7 +427,16 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // Listen for picker responses
-  chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
+  // 普通监听器不能返回无关的 Promise，否则空响应会抢走后台写入/截图结果。
+  chrome.runtime.onMessage.addListener((request) => {
+    if (!['PICKED_SELECTOR', 'PICKED_REGION', 'REGION_PICK_CANCELLED'].includes(request.action)) return;
+    handlePickerResponse(request).catch(e => {
+      console.error('[Scraper] 处理拾取结果失败:', e);
+      showToast('处理拾取结果失败：' + e.message, true);
+    });
+  });
+
+  async function handlePickerResponse(request) {
     if (request.action === 'PICKED_SELECTOR' && activePickerInput) {
       const targetInput = activePickerInput;
       targetInput.value = request.selector;
@@ -416,14 +460,14 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       await focusOptionsTab();
       activeRegionTarget = null;
-      showToast('已记录截图区域，记得点击「保存全局配置」');
+      showToast('已记录截图选择，请保存配置');
     }
 
     if (request.action === 'REGION_PICK_CANCELLED' && activeRegionTarget) {
       activeRegionTarget = null;
       await focusOptionsTab();
     }
-  });
+  }
 
   // ==== 配置导出 / 导入 ====
   exportConfigBtn.addEventListener('click', () => {
@@ -563,6 +607,11 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     const { payload } = pendingImport;
     const mergedRules = mergeConfigRules(collectRulesFromUI(), payload.rules, strategy);
+    const matchError = mergedRules.map(validateRuleMatchField).find(Boolean);
+    if (matchError) {
+      showToast(matchError, true);
+      return;
+    }
 
     const updates = {
       [StorageKeys.SCRAPING_RULES]: mergedRules,
@@ -573,18 +622,24 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (strategy === 'replace' && payload.credentials) {
       updates[StorageKeys.FEISHU_APP_ID] = payload.credentials.appId;
       updates[StorageKeys.FEISHU_APP_SECRET] = payload.credentials.appSecret;
-      appIdEl.value = payload.credentials.appId;
-      appSecretEl.value = payload.credentials.appSecret;
-      data[StorageKeys.FEISHU_APP_ID] = payload.credentials.appId;
-      data[StorageKeys.FEISHU_APP_SECRET] = payload.credentials.appSecret;
 
       if (payload.targetUrl) {
         updates[StorageKeys.FEISHU_DB_URL] = payload.targetUrl;
-        data[StorageKeys.FEISHU_DB_URL] = payload.targetUrl;
       }
     }
 
-    await setStorageData(updates);
+    try {
+      await setStorageData(updates);
+    } catch (e) {
+      showToast('导入失败：' + e.message, true);
+      return;
+    }
+    // 持久化成功后才更新表单与导出使用的快照，失败时保留导入内容供重试。
+    Object.assign(data, updates);
+    if (strategy === 'replace' && payload.credentials) {
+      appIdEl.value = payload.credentials.appId;
+      appSecretEl.value = payload.credentials.appSecret;
+    }
     renderRules(mergedRules);
 
     const importedCount = payload.rules.length;
@@ -620,10 +675,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (!importModal.hidden) closeOverlay(importModal);
   });
 
-  function showToast(msg) {
+  function showToast(msg, isError = false) {
     toastMessage.textContent = msg;
+    toast.querySelector('svg').classList.toggle('hidden', isError);
+    toastMessage.classList.toggle('text-red-300', isError);
     toast.classList.remove('translate-y-20', 'opacity-0');
-    setTimeout(() => {
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
       toast.classList.add('translate-y-20', 'opacity-0');
     }, 3000);
   }

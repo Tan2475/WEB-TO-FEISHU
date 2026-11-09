@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Web to Feishu Scraper",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Flexible web scraper to push arbitrary extracted data and region screenshots to Feishu Bitable, Sheets or Wiki.",
   "icons": {
     "16": "icons/icon16.png",
@@ -24,7 +24,7 @@
   "content_scripts": [
     {
       "matches": ["*://*/*"],
-      "js": ["content/content.js"],
+      "js": ["content/module-capture.js", "content/content.js"],
       "run_at": "document_idle"
     }
   ],

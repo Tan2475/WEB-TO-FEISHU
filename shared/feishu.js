@@ -213,8 +213,15 @@ function resolveAppendedRow(appendData) {
  * Appends a record to Bitable or Spreadsheet based on the URL.
  * @param {Object} screenshots - { 字段名: dataURL }，区域截图字段
  */
-async function appendToFeishu(appId, appSecret, feishuUrl, recordData, screenshots = {}) {
+async function appendToFeishu(appId, appSecret, feishuUrl, recordData, screenshots = {}, matchField = '') {
   const warnings = [];
+  if (typeof matchField !== 'string') throw new Error('匹配字段配置无效。');
+  matchField = matchField.trim();
+  const matchValue = matchField ? comparableFieldValue(recordData[matchField]) : null;
+  if (matchField && (matchValue === null || matchValue === '' || screenshots[matchField] ||
+      (typeof recordData[matchField] === 'string' && recordData[matchField].startsWith('data:image/')))) {
+    throw new Error(`匹配字段「${matchField}」未提取到有效值，数据尚未写入。`);
+  }
   let parsed = parseFeishuUrl(feishuUrl);
   if (parsed.type === 'unknown' || !parsed.token) {
     throw new Error('无效的飞书表格链接，无法识别为多维表格(base)或电子表格(sheets)或知识库(wiki)。');
@@ -245,8 +252,13 @@ async function appendToFeishu(appId, appSecret, feishuUrl, recordData, screensho
   if (parsed.type === 'bitable') {
     if (!parsed.tableId) throw new Error('多维表格URL缺少 table 参数。');
 
+    const recordsUrl = `https://open.feishu.cn/open-apis/bitable/v1/apps/${parsed.token}/tables/${parsed.tableId}/records`;
+    const recordId = matchField ? await findBitableRecord(accessToken, recordsUrl, matchField, matchValue) : null;
+
     // 截图字段：先上传素材换取 file_token，再组装为附件字段值
-    const fields = { ...recordData };
+    // 匹配列只用于定位，不改写原有超链接、公式等类型的值。
+    const fields = Object.fromEntries(Object.entries(recordData)
+      .filter(([name, value]) => !recordId || (value != null && name !== matchField)));
     for (const [name, dataUrl] of Object.entries(screenshots)) {
       const image = splitDataUrl(dataUrl);
       if (!image) {
@@ -257,9 +269,12 @@ async function appendToFeishu(appId, appSecret, feishuUrl, recordData, screensho
       fields[name] = [{ file_token: fileToken }];
     }
 
-    const url = `https://open.feishu.cn/open-apis/bitable/v1/apps/${parsed.token}/tables/${parsed.tableId}/records`;
+    if (recordId && Object.keys(fields).length === 0) {
+      return { record_id: recordId, warnings, operation: 'updated' };
+    }
+    const url = recordId ? `${recordsUrl}/${encodeURIComponent(recordId)}` : recordsUrl;
     const response = await fetch(url, {
-      method: 'POST',
+      method: recordId ? 'PUT' : 'POST',
       headers: {
         'Authorization': `Bearer ${accessToken}`,
         'Content-Type': 'application/json'
@@ -268,7 +283,7 @@ async function appendToFeishu(appId, appSecret, feishuUrl, recordData, screensho
     });
     const data = await response.json();
     if (data.code === 0) {
-      return { ...data.data.record, warnings };
+      return { ...data.data.record, warnings, operation: recordId ? 'updated' : 'created' };
     }
     throw new Error(`Bitable API 写入失败: ${data.msg}`);
   }
@@ -305,38 +320,73 @@ async function appendToFeishu(appId, appSecret, feishuUrl, recordData, screensho
 
     const headerText = (h) => (typeof h === 'string' ? h.trim() : (h && h[0] && h[0].text ? String(h[0].text).trim() : ''));
     const headerIndexOf = (key) => headers.findIndex(h => headerText(h) === key);
+    if (matchField && headers.filter(h => headerText(h) === matchField).length !== 1) {
+      throw new Error(`匹配字段「${matchField}」必须对应唯一表头，请检查列名是否重复或缺失。`);
+    }
+
+    // 在追加行之前校验全部列名，避免部分数据被静默丢弃，或留下无法补图的空行。
+    const fieldNames = [...new Set([...Object.keys(recordData), ...Object.keys(screenshots || {})])];
+    const unmatched = fieldNames.filter(name => headerIndexOf(name) === -1);
+    if (unmatched.length > 0) {
+      throw new Error(`以下字段未匹配电子表格表头：${unmatched.join('、')}。请检查列名，数据尚未写入。`);
+    }
+    if (fieldNames.length === 0) {
+      throw new Error('没有可写入的字段，数据尚未写入。');
+    }
 
     // 3. 构建将要插入的数组
     const rowValues = new Array(headers.length).fill("");
     for (const [key, val] of Object.entries(recordData)) {
       const index = headerIndexOf(key);
       if (index !== -1) {
-        rowValues[index] = val || "";
+        rowValues[index] = val ?? "";
       }
     }
 
-    // 4. 追加行数据
-    const appendUrl = `https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/${parsed.token}/values_append`;
-    const appendRes = await fetch(appendUrl, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        valueRange: {
-          range: `${targetSheetId}!A:Z`,
-          values: [rowValues]
-        }
-      })
-    });
-    const appendData = await appendRes.json();
-    if (appendData.code !== 0) throw new Error(`电子表格写入失败: ${appendData.msg}`);
+    // 匹配模式只更新本次成功提取的单元格，不用整行空值覆盖未配置的列。
+    const matchedRow = matchField ? await findSheetRow(accessToken, parsed.token, targetSheetId,
+      headerIndexOf(matchField), matchValue) : null;
+    let writeData;
+    if (matchedRow) {
+      const valueRanges = Object.entries(recordData)
+        .filter(([name, value]) => value != null && name !== matchField)
+        .map(([name, value]) => {
+          const cell = `${columnLetter(headerIndexOf(name))}${matchedRow}`;
+          return { range: `${targetSheetId}!${cell}:${cell}`, values: [[value]] };
+        });
+      writeData = { code: 0, data: {} };
+      if (valueRanges.length > 0) {
+        const response = await fetch(`https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/${parsed.token}/values_batch_update`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ valueRanges })
+        });
+        writeData = await response.json();
+      }
+    } else {
+      // 4. 没有匹配行时追加数据
+      const appendUrl = `https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/${parsed.token}/values_append`;
+      const appendRes = await fetch(appendUrl, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          valueRange: {
+            range: `${targetSheetId}!A:Z`,
+            values: [rowValues]
+          }
+        })
+      });
+      writeData = await appendRes.json();
+    }
+    if (writeData.code !== 0) throw new Error(`电子表格写入失败: ${writeData.msg}`);
 
     // 5. 截图字段：定位刚追加的行，逐个单元格写入图片
     const screenshotEntries = Object.entries(screenshots || {}).filter(([, v]) => !!v);
     if (screenshotEntries.length > 0) {
-      const rowNumber = resolveAppendedRow(appendData.data);
+      const rowNumber = matchedRow || resolveAppendedRow(writeData.data);
       if (!rowNumber) {
         warnings.push('截图已生成，但无法解析新增行号，图片未写入表格。');
       } else {
@@ -361,8 +411,94 @@ async function appendToFeishu(appId, appSecret, feishuUrl, recordData, screensho
       }
     }
 
-    return { ...appendData.data, warnings };
+    return { ...writeData.data, warnings, operation: matchedRow ? 'updated' : 'created',
+      rowNumber: matchedRow || resolveAppendedRow(writeData.data) };
   }
+}
+
+// API 的文本可能是字符串、数字、链接对象或富文本片段。
+function comparableFieldValue(value, trim = true, emailText = false) {
+  if (value == null) return null;
+  let text;
+  if (typeof value === 'string' || typeof value === 'boolean' ||
+      (typeof value === 'number' && Number.isFinite(value))) text = String(value);
+  else if (Array.isArray(value)) {
+    // 多选等原始值数组不能当作富文本拼接，否则 ['foo','bar'] 会误匹配 'foobar'。
+    if (value.some(part => !part || typeof part !== 'object' || Array.isArray(part))) return null;
+    const parts = value.map(part => comparableFieldValue(part, false, emailText));
+    if (parts.some(part => part === null)) return null;
+    text = parts.join('');
+  } else if (typeof value === 'object' && Object.hasOwn(value, 'value')) {
+    return comparableFieldValue(value.value, trim, emailText);
+  } else if (typeof value === 'object' && typeof value.link === 'string') {
+    text = emailText && value.link.startsWith('mailto:') && typeof value.text === 'string' ? value.text : value.link;
+  }
+  else if (typeof value === 'object' && typeof value.text === 'string') text = value.text;
+  else return null;
+  return trim ? text.trim() : text;
+}
+
+function matchesFieldValue(value, expected) {
+  if (value == null) return false;
+  if (!Array.isArray(value) && typeof value === 'object' && Object.hasOwn(value, 'value')) {
+    return matchesFieldValue(value.value, expected);
+  }
+  const actual = comparableFieldValue(value);
+  if (actual === null) throw new Error('匹配字段的值类型不支持，请使用文本、数字或链接字段。');
+  return actual === expected || comparableFieldValue(value, true, true) === expected;
+}
+
+async function findBitableRecord(accessToken, recordsUrl, fieldName, matchValue) {
+  let recordId = null;
+  let pageToken = '';
+  const seen = new Set();
+  do {
+    const url = new URL(recordsUrl);
+    url.searchParams.set('page_size', '500');
+    if (pageToken) url.searchParams.set('page_token', pageToken);
+    const response = await fetch(url.toString(), { headers: { Authorization: `Bearer ${accessToken}` } });
+    const result = await response.json();
+    if (result.code !== 0 || !Array.isArray(result.data?.items)) {
+      throw new Error(`查找匹配记录失败：${result.msg || '响应数据无效'}`);
+    }
+    for (const record of result.data.items) {
+      if (!matchesFieldValue(record.fields?.[fieldName], matchValue)) continue;
+      if (recordId) throw new Error(`匹配字段「${fieldName}」存在多条相同值记录，请先处理重复数据。`);
+      if (!record.record_id) throw new Error('匹配记录缺少记录 ID，数据尚未写入。');
+      recordId = record.record_id;
+    }
+    if (!result.data.has_more) break;
+    pageToken = result.data.page_token;
+    if (!pageToken || seen.has(pageToken)) throw new Error('查找匹配记录分页异常，数据尚未写入。');
+    seen.add(pageToken);
+  } while (true);
+  return recordId;
+}
+
+async function findSheetRow(accessToken, token, sheetId, columnIndex, matchValue) {
+  if (columnIndex < 0) throw new Error('匹配字段不在电子表格表头中。');
+  const headers = { Authorization: `Bearer ${accessToken}` };
+  const response = await fetch(`https://open.feishu.cn/open-apis/sheets/v3/spreadsheets/${token}/sheets/query`, { headers });
+  const metadata = await response.json();
+  if (metadata.code !== 0) throw new Error(`读取匹配工作表失败：${metadata.msg}`);
+  const sheet = metadata.data?.sheets?.find(item => item.sheet_id === sheetId);
+  const rowCount = sheet?.grid_properties?.row_count;
+  if (!Number.isInteger(rowCount) || rowCount < 1) throw new Error('无法读取匹配工作表行数，数据尚未写入。');
+  const column = columnLetter(columnIndex);
+  let matchedRow = null;
+  for (let start = 2; start <= rowCount; start += 5000) {
+    const range = `${sheetId}!${column}${start}:${column}${Math.min(start + 4999, rowCount)}`;
+    const result = await (await fetch(`https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/${token}/values/${range}?valueRenderOption=UnformattedValue`, { headers })).json();
+    if (result.code !== 0 || !result.data?.valueRange) throw new Error(`读取匹配列失败：${result.msg || '响应数据无效'}`);
+    const rows = result.data.valueRange.values || [];
+    if (!Array.isArray(rows)) throw new Error('读取匹配列失败：响应数据无效。');
+    rows.forEach((row, index) => {
+      if (!matchesFieldValue(row?.[0], matchValue)) return;
+      if (matchedRow) throw new Error('匹配字段存在多行相同值，请先处理重复数据。');
+      matchedRow = start + index;
+    });
+  }
+  return matchedRow;
 }
 
 if (typeof self !== 'undefined') {

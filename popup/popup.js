@@ -29,15 +29,18 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   let currentRule = null;
   let extractedData = null;
-  let shotWarnings = [];
+  let previewWarnings = [];
 
   const isImageDataUrl = (value) => typeof value === 'string' && value.startsWith('data:image/');
 
   function sendTabMessage(tabId, message) {
     return new Promise((resolve) => {
+      const timer = setTimeout(() => resolve({ error: '等待页面响应超时，请刷新网页后重试。' }),
+        message.action === 'PREPARE_REGION' ? 45000 : 15000);
       chrome.tabs.sendMessage(tabId, message, (response) => {
+        clearTimeout(timer);
         if (chrome.runtime.lastError) {
-          resolve({ error: chrome.runtime.lastError.message });
+          resolve({ error: chrome.runtime.lastError.message, transportError: true });
         } else {
           resolve(response);
         }
@@ -47,13 +50,24 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   function sendRuntimeMessage(message) {
     return new Promise((resolve) => {
-      chrome.runtime.sendMessage(message, (response) => {
-        if (chrome.runtime.lastError) {
-          resolve({ error: chrome.runtime.lastError.message });
-        } else {
-          resolve(response);
-        }
-      });
+      try {
+        chrome.runtime.sendMessage(message, (response) => {
+          if (chrome.runtime.lastError) {
+            resolve({ success: false, error: chrome.runtime.lastError.message });
+          } else if (!response || typeof response.success !== 'boolean') {
+            resolve({
+              success: false,
+              error: message.action === 'PUSH_TO_FEISHU'
+                ? '未收到后台写入结果，请先检查目标表格是否已写入，再重新加载扩展。'
+                : '未收到后台截图结果，请重新加载扩展后重试。'
+            });
+          } else {
+            resolve(response);
+          }
+        });
+      } catch (e) {
+        resolve({ success: false, error: e.message || '扩展连接已断开，请重新加载扩展。' });
+      }
     });
   }
 
@@ -64,10 +78,18 @@ document.addEventListener('DOMContentLoaded', async () => {
     return;
   }
 
-  const { SCRAPING_RULES, TEMP_REGION_OVERRIDES } = await getStorageData([
-    StorageKeys.SCRAPING_RULES,
-    StorageKeys.TEMP_REGION_OVERRIDES
-  ]);
+  let settings;
+  try {
+    settings = await getStorageData([
+      StorageKeys.SCRAPING_RULES,
+      StorageKeys.TEMP_REGION_OVERRIDES,
+      StorageKeys.FEISHU_DB_URL
+    ]);
+  } catch (e) {
+    showError('读取配置失败：' + e.message);
+    return;
+  }
+  const { SCRAPING_RULES, TEMP_REGION_OVERRIDES } = settings;
   const rules = SCRAPING_RULES || [];
   const regionOverrides = TEMP_REGION_OVERRIDES || {};
 
@@ -103,17 +125,30 @@ document.addEventListener('DOMContentLoaded', async () => {
       opt.textContent = r.name ? `${r.name}` : `规则 ${idx + 1} (${r.url})`;
       ruleSelector.appendChild(opt);
     });
+    if (matchedRules.length > 1) {
+      const option = document.createElement('option');
+      option.value = '__all__';
+      option.textContent = `全部匹配规则（${matchedRules.length}）`;
+      ruleSelector.appendChild(option);
+    }
     ruleSelector.disabled = false;
     extractBtn.classList.remove('pointer-events-none', 'opacity-50');
 
     // Show meta logic
     const updateMeta = () => {
+      if (ruleSelector.value === '__all__') {
+        ruleMetaInfo.textContent = `依次执行 ${matchedRules.length} 条规则，合并后统一写入`;
+        ruleMetaInfo.classList.remove('hidden');
+        shotPanel.classList.add('hidden');
+        return;
+      }
       const r = matchedRules[ruleSelector.value];
       if (r) {
         const shotCount = (r.fields || []).filter(f => f.type === 'screenshot').length;
         ruleMetaInfo.textContent = shotCount > 0
           ? `包含 ${r.fields.length} 个字段配置（其中 ${shotCount} 个区域截图）`
           : `包含 ${r.fields.length} 个字段配置`;
+        if (r.matchField) ruleMetaInfo.textContent += ` · 按「${r.matchField}」匹配更新`;
         ruleMetaInfo.classList.remove('hidden');
         renderShotPanel(r);
       }
@@ -128,9 +163,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   // Load last used DB URL if available to save time
-  const dbData = await getStorageData([StorageKeys.FEISHU_DB_URL]);
-  if (dbData[StorageKeys.FEISHU_DB_URL]) {
-    if (targetDbUrlEl) targetDbUrlEl.value = dbData[StorageKeys.FEISHU_DB_URL];
+  if (settings[StorageKeys.FEISHU_DB_URL]) {
+    if (targetDbUrlEl) targetDbUrlEl.value = settings[StorageKeys.FEISHU_DB_URL];
   }
 
   // 截图字段面板：展示当前区域尺寸，并提供本次临时重选入口
@@ -154,7 +188,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       const metaEl = document.createElement('span');
       const size = field.region
-        ? `${Math.round(field.region.width)}×${Math.round(field.region.height)}`
+        ? field.region.mode === 'module' ? `${field.region.modules.length} 个模块` : `${Math.round(field.region.width)}×${Math.round(field.region.height)}`
         : '未框选';
       metaEl.className = 'shrink-0 text-[10px] ' + (field.__overridden ? 'text-blue-600 font-medium' : 'text-gray-400');
       metaEl.textContent = field.__overridden ? `${size} · 本次重选` : size;
@@ -176,16 +210,22 @@ document.addEventListener('DOMContentLoaded', async () => {
     const key = ruleKeyOf(matchedRules[ruleSelector.value] || {});
     const next = { ...regionOverrides };
     delete next[key];
-    await setStorageData({ [StorageKeys.TEMP_REGION_OVERRIDES]: next });
+    try {
+      await setStorageData({ [StorageKeys.TEMP_REGION_OVERRIDES]: next });
+    } catch (e) {
+      showError('保存失败：' + e.message);
+      return;
+    }
     location.reload();
   });
 
   async function repickRegion(rule, field) {
-    shotHint.textContent = '已进入框选模式，请在网页上拖拽选择区域；框选完成后重新打开本窗口继续。';
+    const moduleMode = field.region?.mode === 'module';
+    shotHint.textContent = moduleMode ? '请在网页选择模块，完成后重新打开此窗口。' : '请在网页拖拽框选，完成后重新打开此窗口。';
     shotHint.classList.remove('hidden');
 
     const message = {
-      action: 'START_REGION_PICK',
+      action: moduleMode ? 'START_MODULE_PICK' : 'START_REGION_PICK',
       payload: { ruleKey: ruleKeyOf(rule), fieldName: field.name }
     };
 
@@ -194,7 +234,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       // 内容脚本尚未注入时按需注入并重试
       await new Promise((resolve) => {
         chrome.scripting.executeScript(
-          { target: { tabId: tab.id }, files: ['content/content.js'] },
+          { target: { tabId: tab.id }, files: ['content/module-capture.js', 'content/content.js'] },
           () => resolve()
         );
       });
@@ -213,70 +253,76 @@ document.addEventListener('DOMContentLoaded', async () => {
   // 2. Click Extract -> Message Content Script -> Show Preview
   extractBtn.addEventListener('click', async () => {
     const selectedIdx = ruleSelector.value;
-    if (selectedIdx === '' || !matchedRules[selectedIdx]) return;
+    if (selectedIdx !== '__all__' && (selectedIdx === '' || !matchedRules[selectedIdx])) return;
 
     const dbUrl = targetDbUrlEl.value.trim();
     if (!dbUrl) {
       alert("请先填写目标飞书表格链接！");
       return;
     }
-    await setStorageData({ [StorageKeys.FEISHU_DB_URL]: dbUrl });
+    try {
+      await setStorageData({ [StorageKeys.FEISHU_DB_URL]: dbUrl });
+    } catch (e) {
+      showError('保存失败：' + e.message);
+      return;
+    }
 
     currentRule = matchedRules[selectedIdx];
     showView(loadingView);
     setLoadingText('正在抓取页面数据...');
 
-    chrome.tabs.sendMessage(tab.id, { action: 'EXTRACT_DATA', rule: currentRule }, (response) => {
-      if (chrome.runtime.lastError) {
-        // Content script might not be injected
-        chrome.scripting.executeScript({
-          target: { tabId: tab.id },
-          files: ['content/content.js']
-        }, () => {
-          if (chrome.runtime.lastError) {
-            showError("无法注入脚本：请刷新页面后重试。" + chrome.runtime.lastError.message);
-            return;
-          }
-          // Retry
-          let didRespond = false;
-          chrome.tabs.sendMessage(tab.id, { action: 'EXTRACT_DATA', rule: currentRule }, (res) => {
-            if (chrome.runtime.lastError) console.warn("Retry error:", chrome.runtime.lastError);
-            didRespond = true;
-            handleExtractResponse(res);
+    try {
+      const rulesToRun = selectedIdx === '__all__' ? matchedRules : [currentRule];
+      const merged = await executeRuleBatch(rulesToRun, async (rule, index) => {
+        currentRule = rule;
+        setLoadingText(`正在抓取 ${index + 1}/${rulesToRun.length}：${rule.name || '规则'}`);
+        let response = await sendTabMessage(tab.id, { action: 'EXTRACT_DATA', rule });
+        if (response?.transportError) {
+          await new Promise((resolve, reject) => {
+            chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content/module-capture.js', 'content/content.js'] }, () => {
+              if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+              else resolve();
+            });
           });
-
-          // Fallback timeout in case port crashes completely due to orphaned scripts
-          setTimeout(() => {
-            if (!didRespond) {
-              showError("等待解析数据超时。可能是拓展更新后上下文断开，请【刷新当前网页】后再试！");
-            }
-          }, currentRule.preSelector ? 2500 : 1500);
-        });
-      } else {
-        handleExtractResponse(response);
-      }
-    });
+          response = await sendTabMessage(tab.id, { action: 'EXTRACT_DATA', rule });
+        }
+        return await handleExtractResponse(response, rule);
+      });
+      currentRule = { matchField: merged.matchField };
+      extractedData = merged.data;
+      previewWarnings = merged.warnings;
+      renderPreview(extractedData);
+      renderShotWarning();
+      showView(previewView);
+    } catch (e) {
+      extractedData = null;
+      showError('抓取失败：' + e.message);
+    }
   });
 
-  async function handleExtractResponse(response) {
+  async function handleExtractResponse(response, rule) {
     if (!response || response.error) {
-      showError(response ? response.error : "提取失败：未知错误");
-      return;
+      throw new Error(response?.error || '未收到页面提取结果，请刷新网页后重试。');
     }
     extractedData = response.data || {};
-    shotWarnings = [];
+    previewWarnings = [];
+
+    // 文本字段没命中元素时明确说出来，否则用户只看到「未找到」无从排查
+    if (Array.isArray(response.missing) && response.missing.length > 0) {
+      previewWarnings.push(
+        `未找到，已跳过：${response.missing.join('、')}`
+      );
+    }
 
     // 截图字段需要先滚动定位再逐张捕获，与文本字段分开处理
     try {
-      await captureScreenshotFields(tab.id, currentRule);
+      await captureScreenshotFields(tab.id, rule);
     } catch (e) {
       console.error('[Scraper] 截图流程异常:', e);
-      shotWarnings.push(`截图流程异常：${e.message || e}`);
+      previewWarnings.push(`截图流程异常：${e.message || e}`);
     }
 
-    renderPreview(extractedData);
-    renderShotWarning();
-    showView(previewView);
+    return { data: extractedData, warnings: [...previewWarnings] };
   }
 
   async function captureScreenshotFields(tabId, rule) {
@@ -288,7 +334,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (field.region && field.region.width && field.region.height) {
         ready.push(field);
       } else {
-        shotWarnings.push(`「${field.name}」未配置截图区域，已跳过`);
+        previewWarnings.push(`「${field.name}」未配置截图区域，已跳过`);
       }
     }
 
@@ -298,18 +344,18 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       const prepared = await sendTabMessage(tabId, { action: 'PREPARE_REGION', region: field.region });
       if (!prepared || prepared.error) {
-        shotWarnings.push(`「${field.name}」${prepared ? prepared.error : '定位区域失败'}`);
+        previewWarnings.push(`「${field.name}」${prepared ? prepared.error : '定位区域失败'}`);
         continue;
       }
       if (prepared.warning) {
-        shotWarnings.push(`「${field.name}」${prepared.warning}`);
+        previewWarnings.push(`「${field.name}」${prepared.warning}`);
       }
 
       const shot = await sendRuntimeMessage({ action: 'CAPTURE_REGION', tabId, rect: prepared.rect });
       if (shot && shot.success && shot.dataUrl) {
         extractedData[field.name] = shot.dataUrl;
       } else {
-        shotWarnings.push(`「${field.name}」截图失败：${shot ? (shot.error || '未知错误') : '无响应'}`);
+        previewWarnings.push(`「${field.name}」截图失败：${shot ? (shot.error || '未知错误') : '无响应'}`);
       }
     }
   }
@@ -357,17 +403,21 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   function renderShotWarning() {
-    if (shotWarnings.length === 0) {
+    if (previewWarnings.length === 0) {
       shotWarning.classList.add('hidden');
       shotWarning.textContent = '';
       return;
     }
     shotWarning.classList.remove('hidden');
-    shotWarning.textContent = shotWarnings.join('；');
+    shotWarning.textContent = previewWarnings.join('；');
   }
 
   // 3. Confirm Push
   confirmPushBtn.addEventListener('click', async () => {
+    if (extractedData && !Object.values(extractedData).some(value => value != null)) {
+      showError('未抓取到可写入的数据。');
+      return;
+    }
     const dbUrl = targetDbUrlEl.value.trim();
     showView(loadingView);
     setLoadingText('正在写入飞书...');
@@ -376,6 +426,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const recordData = {};
     const screenshots = {};
     for (const [key, value] of Object.entries(extractedData || {})) {
+      if (value == null) continue;
       if (isImageDataUrl(value)) {
         screenshots[key] = value;
       } else {
@@ -387,17 +438,19 @@ document.addEventListener('DOMContentLoaded', async () => {
       action: 'PUSH_TO_FEISHU',
       recordData,
       screenshots,
+      matchField: currentRule?.matchField || '',
       dbUrl
     });
 
     if (!response || !response.success) {
-      showError("写入飞书失败：" + (response ? response.error : '未知错误'));
+      showError("写入飞书失败：" + (response?.error || '后台未返回错误详情，请先检查目标表格是否已写入。'));
       return;
     }
 
     const warnings = (response.result && response.result.warnings) || [];
     const imageCount = Object.keys(screenshots).length;
-    let msg = imageCount > 0 ? `成功写入飞书（含 ${imageCount} 张截图）！` : '成功写入飞书！';
+    const operation = response.result?.operation === 'updated' ? '已更新匹配行' : '已新增一行';
+    let msg = imageCount > 0 ? `${operation}（含 ${imageCount} 张截图）` : operation;
     if (warnings.length > 0) {
       msg += ' 但：' + warnings.join('；');
     }

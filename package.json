@@ -1,9 +1,10 @@
 {
   "name": "web-to-feishu",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "",
   "main": "index.js",
   "scripts": {
+    "test": "node --test tests/*.test.js",
     "build": "tailwindcss -i ./src/styles.css -o ./dist/tailwind.css",
     "watch": "tailwindcss -i ./src/styles.css -o ./dist/tailwind.css --watch"
   },
