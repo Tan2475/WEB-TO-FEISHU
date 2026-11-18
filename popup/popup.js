@@ -30,6 +30,14 @@ document.addEventListener('DOMContentLoaded', async () => {
   let currentRule = null;
   let extractedData = null;
   let previewWarnings = [];
+  let currentRequestId = null;
+
+  // 后台逐阶段回报写入进度，弹窗只展示本次请求的消息
+  chrome.runtime.onMessage.addListener((message) => {
+    if (!message || message.action !== 'PUSH_PROGRESS') return;
+    if (!currentRequestId || message.requestId !== currentRequestId) return;
+    if (message.label) setLoadingText(message.label);
+  });
 
   const isImageDataUrl = (value) => typeof value === 'string' && value.startsWith('data:image/');
 
@@ -422,6 +430,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const dbUrl = targetDbUrlEl.value.trim();
     showView(loadingView);
     setLoadingText('正在写入飞书...');
+    currentRequestId = `push-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
     // 文本字段与截图字段分开传递，后端按表类型走不同的图片写入通道
     const recordData = {};
@@ -437,11 +446,13 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     const response = await sendRuntimeMessage({
       action: 'PUSH_TO_FEISHU',
+      requestId: currentRequestId,
       recordData,
       screenshots,
       matchField: currentRule?.matchField || '',
       dbUrl
     });
+    currentRequestId = null;
 
     if (!response || !response.success) {
       showError("写入飞书失败：" + (response?.error || '后台未返回错误详情，请先检查目标表格是否已写入。'));

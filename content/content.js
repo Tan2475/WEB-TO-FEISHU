@@ -5,6 +5,88 @@ if (!window.__FEISHU_SCRAPER_INJECTED) {
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+  // ==== 渲染稳定检测：用「不再变化」代替固定等待 ====
+  function clearTimer(timer) {
+    if (timer && typeof clearTimeout === 'function') clearTimeout(timer);
+  }
+
+  function nextFrame() {
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+      // 后台标签页不触发 rAF，用定时器兜底
+      const timer = setTimeout(done, 60);
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(() => {
+          clearTimer(timer);
+          done();
+        });
+      }
+    });
+  }
+
+  function waitForDomQuiet(idle = 120, timeout = 800) {
+    return new Promise((resolve) => {
+      let idleTimer = null;
+      let capTimer = null;
+      let observer = null;
+      let finished = false;
+
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        clearTimer(idleTimer);
+        clearTimer(capTimer);
+        if (observer) observer.disconnect();
+        resolve();
+      };
+      capTimer = setTimeout(finish, timeout);
+
+      try {
+        observer = new MutationObserver(() => {
+          clearTimer(idleTimer);
+          idleTimer = setTimeout(finish, idle);
+        });
+        observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
+      } catch (e) {
+        // 观察失败时退化为最短等待，不影响后续提取
+        idleTimer = setTimeout(finish, idle);
+        return;
+      }
+      idleTimer = setTimeout(finish, idle);
+    });
+  }
+
+  function pendingImagesIn(rect) {
+    const images = document.images || [];
+    let pending = 0;
+    for (const img of images) {
+      if (img.complete) continue;
+      const r = img.getBoundingClientRect();
+      if (r.right > rect.x && r.left < rect.x + rect.width &&
+          r.bottom > rect.y && r.top < rect.y + rect.height) pending++;
+    }
+    return pending;
+  }
+
+  async function waitForRegionStable(signatureOf, timeout = 800, minWait = 80) {
+    const start = Date.now();
+    let previous = null;
+    let stable = 0;
+    for (;;) {
+      const signature = signatureOf();
+      stable = signature !== null && signature === previous ? stable + 1 : 0;
+      previous = signature;
+      const elapsed = Date.now() - start;
+      if ((stable >= 2 && elapsed >= minWait) || elapsed >= timeout) return;
+      await nextFrame();
+    }
+  }
+
   /**
    * 为元素生成尽量稳定的 CSS 选择器。
    * 顺序：唯一 id → 唯一 data-* 属性 → 最短的唯一「标签+类名」路径。
@@ -281,7 +363,8 @@ if (!window.__FEISHU_SCRAPER_INJECTED) {
         if (Date.now() >= deadline) throw new Error('切换目标页签超时，已停止抓取。');
         await sleep(100);
       }
-      await sleep(400);
+      // 页签内容异步挂载，等 DOM 安静下来再继续，比固定时长更贴合实际渲染速度
+      await waitForDomQuiet();
     }
     const deadline = Date.now() + 5000;
     while (Array.from(document.querySelectorAll('[aria-busy="true"], .el-loading-mask'))
@@ -311,11 +394,18 @@ if (!window.__FEISHU_SCRAPER_INJECTED) {
   }
 
   async function waitForPreActionTarget(selector, type) {
+    // 缓存只在进入等待和超时判定时各刷新一次：
+    // 每轮轮询都清缓存会退化成每 200ms 全页扫一遍，重页面下明显卡顿。
     const deadline = Date.now() + 3000;
+    resetShadowRootCache();
     for (;;) {
-      resetShadowRootCache();
       const target = findPreActionTarget(selector, type);
-      if (target || Date.now() >= deadline) return target;
+      if (target) return target;
+      if (Date.now() >= deadline) {
+        // 等待期间可能新增 Web Component，超时前最后重扫一次再判定
+        resetShadowRootCache();
+        return findPreActionTarget(selector, type);
+      }
       await sleep(200);
     }
   }
@@ -806,8 +896,18 @@ if (!window.__FEISHU_SCRAPER_INJECTED) {
             });
           }
 
-          // 等待滚动与懒加载渲染稳定
-          await sleep(400);
+          // 等待滚动与懒加载渲染稳定：区域位置连续两帧不变且图片加载完成，
+          // 通常几十毫秒即可通过，慢站最多等 800ms。
+          await waitForRegionStable(() => {
+            const current = locateRegion(region) || located;
+            const view = {
+              x: Math.round(current.x - window.scrollX),
+              y: Math.round(current.y - window.scrollY),
+              width: Math.round(current.width),
+              height: Math.round(current.height)
+            };
+            return pendingImagesIn(view) > 0 ? null : `${view.x},${view.y},${view.width},${view.height}`;
+          });
 
           // 滚动后重新定位，避免布局位移导致偏差
           located = locateRegion(region) || located;

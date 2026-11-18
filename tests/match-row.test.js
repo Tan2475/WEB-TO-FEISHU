@@ -11,9 +11,11 @@ function load(file, globals = {}) {
 }
 
 function client({ type = 'sheets', rows = [['key']], pages = [], rowCount = 10, failRead = false,
-  headers = ['ID', '标题', '备注', '截图'], sheetMeta = null, block = null } = {}) {
+  headers = ['ID', '标题', '备注', '截图'], sheetMeta = null, block = null, chromeGlobal = null } = {}) {
   const requests = [], writes = [];
-  const context = load('shared/feishu.js', { fetch: async (url, options = {}) => {
+  const context = load('shared/feishu.js', {
+    ...(chromeGlobal ? { chrome: chromeGlobal } : {}),
+    fetch: async (url, options = {}) => {
     const method = options.method || 'GET';
     const body = options.body && typeof options.body === 'string' ? JSON.parse(options.body) : options.body;
     const request = { url, method, body };
@@ -41,9 +43,10 @@ function client({ type = 'sheets', rows = [['key']], pages = [], rowCount = 10, 
       data = url.includes('/records') ? { record: { record_id: 'rec1' } } : { updates: { updatedRange: 's1!A8:D8' } };
     }
     return { json: async () => ({ code: 0, data, tenant_access_token: 'mock' }) };
-  } });
-  return { requests, writes, run: (record = { ID: 'key', 标题: '新标题' }, shots = {}, matchField = 'ID') =>
-    context.appendToFeishu('mock', 'mock', `https://example.feishu.cn/${type}/token?sheet=s1&table=tbl1`, record, shots, matchField) };
+    }
+  });
+  return { requests, writes, run: (record = { ID: 'key', 标题: '新标题' }, shots = {}, matchField = 'ID', options) =>
+    context.appendToFeishu('mock', 'mock', `https://example.feishu.cn/${type}/token?sheet=s1&table=tbl1`, record, shots, matchField, options) };
 }
 
 test('sheet match updates only provided non-null cells in the existing row', async () => {
@@ -288,4 +291,95 @@ test('missing column_count falls back to a wide header range', async () => {
     ['s1!A1:AZ1']
   );
   assert.equal(c.writes[0].body.valueRange.range, 's1!A:D');
+});
+
+test('tenant token is reused across consecutive writes', async () => {
+  const c = client();
+  await c.run({ ID: 'key' }, {}, '');
+  await c.run({ ID: 'key' }, {}, '');
+  assert.equal(c.requests.filter(r => r.url.includes('/auth/')).length, 1);
+});
+
+test('sheet match reuses sub-sheet metadata instead of querying twice', async () => {
+  const c = client({ rows: [['key']] });
+  const result = await c.run({ ID: 'key', 标题: '新标题' });
+  assert.equal(result.operation, 'updated');
+  assert.equal(c.requests.filter(r => r.url.includes('/sheets/query')).length, 1);
+});
+
+test('bitable uploads every screenshot and keeps all attachment fields', async () => {
+  const c = client({ type: 'base', pages: [[]] });
+  const shots = {
+    图一: 'data:image/png;base64,AA==',
+    图二: 'data:image/png;base64,AA==',
+    图三: 'data:image/png;base64,AA=='
+  };
+  const result = await c.run({ ID: 'key' }, shots);
+  assert.equal(result.operation, 'created');
+  assert.equal(c.requests.filter(r => r.url.includes('/upload_all')).length, 3);
+  const fields = c.writes[0].body.fields;
+  assert.deepEqual(Object.keys(fields).filter(k => k.startsWith('图')).sort(),
+    ['图一', '图二', '图三'].sort());
+});
+
+test('sheet writes every screenshot cell in the appended row', async () => {
+  const c = client({ rows: [], headers: ['ID', '图一', '图二', '图三'] });
+  const shots = {
+    图一: 'data:image/png;base64,AA==',
+    图二: 'data:image/png;base64,AA==',
+    图三: 'data:image/png;base64,AA=='
+  };
+  const result = await c.run({ ID: 'key' }, shots, '');
+  assert.equal(result.operation, 'created');
+  const cells = c.writes.filter(w => w.url.includes('/values_image')).map(w => w.body.range).sort();
+  assert.deepEqual(cells, ['s1!B8:B8', 's1!C8:C8', 's1!D8:D8']);
+});
+
+test('tenant token cache survives a service worker restart via storage', async () => {
+  const store = {};
+  const chromeGlobal = {
+    storage: { local: {
+      get(keys, cb) {
+        const out = {};
+        for (const key of keys) if (Object.hasOwn(store, key)) out[key] = store[key];
+        cb(out);
+      },
+      set(values, cb) { Object.assign(store, values); if (cb) cb(); }
+    } },
+    runtime: { get lastError() { return undefined; } }
+  };
+
+  const first = client({ chromeGlobal });
+  await first.run({ ID: 'key' }, {}, '');
+  assert.equal(first.requests.filter(r => r.url.includes('/auth/')).length, 1);
+
+  // 新上下文相当于 Service Worker 被重启，内存缓存丢失，应命中持久化缓存
+  const second = client({ chromeGlobal });
+  const result = await second.run({ ID: 'key' }, {}, '');
+  assert.equal(result.operation, 'created');
+  assert.equal(second.requests.filter(r => r.url.includes('/auth/')).length, 0);
+});
+
+test('write reports progress for match, each screenshot and final write', async () => {
+  const c = client({ type: 'base', pages: [[]] });
+  const stages = [];
+  await c.run({ ID: 'key' },
+    { 图一: 'data:image/png;base64,AA==', 图二: 'data:image/png;base64,AA==' },
+    'ID', { onProgress: progress => stages.push(progress) });
+  assert.deepEqual(stages.map(s => s.stage), ['match', 'upload', 'upload', 'write']);
+  assert.equal(stages[1].total, 2);
+  assert.match(stages[1].label, /正在上传截图 1\/2/);
+});
+
+test('sheet write reports header, match and write stages', async () => {
+  const c = client({ rows: [['key']] });
+  const stages = [];
+  await c.run({ ID: 'key', 标题: '新标题' }, {}, 'ID', { onProgress: progress => stages.push(progress.stage) });
+  assert.deepEqual(stages, ['header', 'match', 'write']);
+});
+
+test('progress callback failures never abort the write', async () => {
+  const c = client();
+  const result = await c.run({ ID: 'key' }, {}, '', { onProgress: () => { throw new Error('boom'); } });
+  assert.equal(result.operation, 'created');
 });

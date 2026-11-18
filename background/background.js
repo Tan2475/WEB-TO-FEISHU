@@ -88,7 +88,18 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           throw new Error('Feishu DB URL is required.');
         }
 
-        const result = await self.appendToFeishu(appId, appSecret, dbUrl, recordData, screenshots || {}, matchField || '');
+        const result = await self.appendToFeishu(appId, appSecret, dbUrl, recordData, screenshots || {}, matchField || '', {
+          onProgress: (progress) => {
+            // 弹窗可能已关闭，发送失败无需处理
+            try {
+              chrome.runtime.sendMessage({ action: 'PUSH_PROGRESS', requestId: request.requestId || '', ...progress }, () => {
+                void chrome.runtime.lastError;
+              });
+            } catch (e) {
+              // 忽略
+            }
+          }
+        });
         sendResponse({ success: true, result });
       } catch (e) {
         console.error('Failed to push to Feishu:', e);
