@@ -11,7 +11,7 @@ function load(file, globals = {}) {
 }
 
 function client({ type = 'sheets', rows = [['key']], pages = [], rowCount = 10, failRead = false,
-  headers = ['ID', '标题', '备注', '截图'] } = {}) {
+  headers = ['ID', '标题', '备注', '截图'], sheetMeta = null, block = null } = {}) {
   const requests = [], writes = [];
   const context = load('shared/feishu.js', { fetch: async (url, options = {}) => {
     const method = options.method || 'GET';
@@ -20,7 +20,8 @@ function client({ type = 'sheets', rows = [['key']], pages = [], rowCount = 10, 
     requests.push(request);
     let data;
     if (url.includes('/auth/')) data = { tenant_access_token: 'mock' };
-    else if (url.includes('/sheets/query')) data = { sheets: [{ sheet_id: 's1', grid_properties: { row_count: rowCount, column_count: headers.length } }] };
+    else if (url.includes('/sheets/query')) data = { sheets: [sheetMeta ||
+      { sheet_id: 's1', grid_properties: { row_count: rowCount, column_count: headers.length } }] };
     else if (method === 'GET' && url.includes('/values/')) {
       const range = decodeURIComponent(url.split('/values/')[1]);
       if (/!A1:[A-Z]+1$/.test(range)) data = { valueRange: { values: [headers] } };
@@ -34,6 +35,7 @@ function client({ type = 'sheets', rows = [['key']], pages = [], rowCount = 10, 
       const page = Number(new URL(url).searchParams.get('page_token') || 0);
       data = { items: pages[page] || [], has_more: page + 1 < pages.length, page_token: String(page + 1) };
     } else if (url.includes('/upload_all')) data = { file_token: 'image-token' };
+    else if (url.includes('/metainfo')) data = { sheets: [{ sheetId: 's1', ...(block ? { blockInfo: block } : {}) }] };
     else {
       writes.push(request);
       data = url.includes('/records') ? { record: { record_id: 'rec1' } } : { updates: { updatedRange: 's1!A8:D8' } };
@@ -241,4 +243,49 @@ test('sheet headers beyond column Z are read and written', async () => {
   assert.equal(row.length, 28);
   assert.equal(row[26], '一二线女性');
   assert.equal(row[27], '12%');
+});
+
+test('embedded bitable sub-sheet writes through the bitable records api', async () => {
+  const c = client({
+    sheetMeta: { sheet_id: 's1', resource_type: 'bitable', bitable_app_token: 'app-token', bitable_table_id: 'tblEmbedded' },
+    pages: [[]]
+  });
+  const result = await c.run({ ID: 'key', 标题: '新标题' });
+  assert.equal(result.operation, 'created');
+  assert.ok(c.writes[0].url.includes('/bitable/v1/apps/app-token/tables/tblEmbedded/records'));
+  assert.equal(c.writes[0].method, 'POST');
+});
+
+test('embedded bitable app token is resolved from spreadsheet metainfo blockToken', async () => {
+  const c = client({
+    sheetMeta: { sheet_id: 's1', resource_type: 'bitable' },
+    block: { blockType: 'BITABLE_BLOCK', blockToken: 'app-token_tblBlock' },
+    pages: [[]]
+  });
+  const result = await c.run({ ID: 'key' });
+  assert.equal(result.operation, 'created');
+  assert.ok(c.writes[0].url.includes('/bitable/v1/apps/app-token/tables/tblBlock/records'));
+});
+
+test('non-grid sub-sheet without bitable info refuses to write', async () => {
+  const c = client({ sheetMeta: { sheet_id: 's1', resource_type: 'bitable' } });
+  await assert.rejects(c.run(), /未能解析出/);
+  assert.equal(c.writes.length, 0);
+});
+
+test('unsupported embedded sub-sheet type is rejected', async () => {
+  const c = client({ sheetMeta: { sheet_id: 's1', resource_type: '#UNSUPPORTED_TYPE' } });
+  await assert.rejects(c.run(), /无法按单元格写入/);
+  assert.equal(c.writes.length, 0);
+});
+
+test('missing column_count falls back to a wide header range', async () => {
+  const c = client({ sheetMeta: { sheet_id: 's1', grid_properties: { row_count: 10 } } });
+  const result = await c.run({ ID: 'key' }, {}, '');
+  assert.equal(result.operation, 'created');
+  assert.deepEqual(
+    c.requests.filter(r => r.url.includes('/values/')).map(r => decodeURIComponent(r.url.split('/values/')[1])),
+    ['s1!A1:AZ1']
+  );
+  assert.equal(c.writes[0].body.valueRange.range, 's1!A:D');
 });

@@ -210,6 +210,48 @@ function resolveAppendedRow(appendData) {
 }
 
 /**
+ * 读取电子表格的子表清单。子表可能是普通网格，也可能是内嵌的多维表格。
+ */
+async function fetchSheetList(accessToken, spreadsheetToken) {
+  const url = `https://open.feishu.cn/open-apis/sheets/v3/spreadsheets/${spreadsheetToken}/sheets/query`;
+  const response = await fetch(url, { headers: { 'Authorization': `Bearer ${accessToken}` } });
+  const data = await response.json();
+  if (data.code !== 0) throw new Error(`获取电子表格信息失败: ${data.msg}`);
+
+  const sheets = data.data && data.data.sheets;
+  if (!Array.isArray(sheets) || sheets.length === 0) {
+    throw new Error('无法读取该表格：未能获取到分表(Sheet)列表。');
+  }
+  return sheets;
+}
+
+/**
+ * 读取电子表格里内嵌多维表格的真实标识。
+ * 子表接口只返回 resource_type，不返回 app_token；
+ * 需要从电子表格元信息的 blockInfo.blockToken 解析，格式为 appToken_tableId。
+ */
+async function fetchEmbeddedBitableBlock(accessToken, spreadsheetToken, sheetId) {
+  const url = `https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/${spreadsheetToken}/metainfo`;
+  const response = await fetch(url, { headers: { 'Authorization': `Bearer ${accessToken}` } });
+  const data = await response.json();
+  if (data.code !== 0) throw new Error(`读取电子表格元信息失败: ${data.msg}`);
+
+  const sheets = data.data && data.data.sheets;
+  if (!Array.isArray(sheets)) return null;
+
+  const sheet = sheets.find(item => item.sheetId === sheetId || item.sheet_id === sheetId);
+  const block = sheet && sheet.blockInfo;
+  if (!block || block.blockType !== 'BITABLE_BLOCK' || typeof block.blockToken !== 'string') return null;
+
+  const separator = block.blockToken.indexOf('_');
+  if (separator <= 0) return null;
+  return {
+    appToken: block.blockToken.slice(0, separator),
+    tableId: block.blockToken.slice(separator + 1)
+  };
+}
+
+/**
  * Appends a record to Bitable or Spreadsheet based on the URL.
  * @param {Object} screenshots - { 字段名: dataURL }，区域截图字段
  */
@@ -243,9 +285,46 @@ async function appendToFeishu(appId, appSecret, feishuUrl, recordData, screensho
     if (objType === 'bitable') {
       parsed = { type: 'bitable', token: objToken, tableId: parsed.tableHint };
     } else if (objType === 'sheet') {
-      parsed = { type: 'sheet', token: objToken, sheetId: parsed.sheetHint };
+      parsed = { type: 'sheet', token: objToken, sheetId: parsed.sheetHint, tableHint: parsed.tableHint };
     } else {
       throw new Error(`不支持的知识库节点类型: ${objType}`);
+    }
+  }
+
+  // 电子表格里可能内嵌「多维表格」子表，这类子表没有网格属性，
+  // 必须改走多维表格记录接口，因此先取子表清单确认目标子表的真实类型。
+  let sheetTarget = null;
+  if (parsed.type === 'sheet') {
+    const sheetList = await fetchSheetList(accessToken, parsed.token);
+    const targetSheetId = parsed.sheetId || sheetList[0].sheet_id;
+    const targetSheet = sheetList.find(item => item.sheet_id === targetSheetId);
+    if (!targetSheet) {
+      throw new Error(`未找到子表(${targetSheetId})，请检查链接中的 sheet 参数是否有效。`);
+    }
+
+    // 仅在接口明确标注为非网格类型时才切换通道，避免影响普通电子表格。
+    if (targetSheet.resource_type && targetSheet.resource_type !== 'sheet') {
+      const name = targetSheet.title || targetSheet.sheet_name || targetSheetId;
+      if (targetSheet.resource_type !== 'bitable') {
+        throw new Error(`子表「${name}」不是普通数据表（类型：${targetSheet.resource_type}），无法按单元格写入。`);
+      }
+      // 内嵌多维表格是独立文档，需用它自己的 app token 走记录接口。
+      let appToken = targetSheet.bitable_app_token;
+      let tableId = targetSheet.bitable_table_id || parsed.tableHint;
+      if (!appToken) {
+        const block = await fetchEmbeddedBitableBlock(accessToken, parsed.token, targetSheetId);
+        if (block) {
+          appToken = block.appToken;
+          tableId = block.tableId || tableId;
+        }
+      }
+      if (!appToken || !tableId) {
+        throw new Error(`子表「${name}」是内嵌的多维表格，但未能解析出它所属的多维表格标识，无法直接写入。` +
+          `请确认应用拥有该多维表格的编辑权限后重试。`);
+      }
+      parsed = { type: 'bitable', token: appToken, tableId };
+    } else {
+      sheetTarget = { id: targetSheetId, meta: targetSheet };
     }
   }
 
@@ -289,30 +368,12 @@ async function appendToFeishu(appId, appSecret, feishuUrl, recordData, screensho
   }
   else if (parsed.type === 'sheet') {
     // 电子表格 API (Spreadsheet)
-    // 1. 获取工作表元数据：缺少 sheetId 时用于定位首个分表，
-    //    同时取实际列数，避免按固定 26 列读表头而漏掉 AA 之后的列。
-    const metaUrl = `https://open.feishu.cn/open-apis/sheets/v3/spreadsheets/${parsed.token}/sheets/query`;
-    const metaRes = await fetch(metaUrl, { headers: { 'Authorization': `Bearer ${accessToken}` } });
-    const metaData = await metaRes.json();
-    if (metaData.code !== 0) throw new Error(`获取电子表格信息失败: ${metaData.msg}`);
+    const targetSheetId = sheetTarget.id;
+    // 列数取子表网格属性；接口未返回时回退到较宽范围，避免直接失败。
+    const rawColumnCount = Number(sheetTarget.meta.grid_properties && sheetTarget.meta.grid_properties.column_count);
+    const columnCount = Number.isInteger(rawColumnCount) && rawColumnCount > 0 ? rawColumnCount : 52;
 
-    const sheetsList = metaData.data && metaData.data.sheets;
-    if (!sheetsList || sheetsList.length === 0) {
-      throw new Error("无法读取该表格：未能获取到分表(Sheet)列表。");
-    }
-
-    const targetSheetId = parsed.sheetId || sheetsList[0].sheet_id;
-    const targetSheet = sheetsList.find(item => item.sheet_id === targetSheetId);
-    if (!targetSheet) {
-      throw new Error(`未找到子表(${targetSheetId})，请检查链接中的 sheet 参数是否有效。`);
-    }
-
-    const columnCount = Number(targetSheet.grid_properties && targetSheet.grid_properties.column_count);
-    if (!Number.isInteger(columnCount) || columnCount < 1) {
-      throw new Error('无法读取工作表列数，数据尚未写入。');
-    }
-
-    // 2. 读取第一行作为表头映射，范围按实际列数取满整行
+    // 读取第一行作为表头映射，范围按实际列数取满整行
     const headerLastColumn = columnLetter(columnCount - 1);
     const getRangeUrl = `https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/${parsed.token}/values/${targetSheetId}!A1:${headerLastColumn}1`;
     const headerRes = await fetch(getRangeUrl, { headers: { 'Authorization': `Bearer ${accessToken}` } });
