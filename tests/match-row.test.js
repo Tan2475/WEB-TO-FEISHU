@@ -20,10 +20,10 @@ function client({ type = 'sheets', rows = [['key']], pages = [], rowCount = 10, 
     requests.push(request);
     let data;
     if (url.includes('/auth/')) data = { tenant_access_token: 'mock' };
-    else if (url.includes('/sheets/query')) data = { sheets: [{ sheet_id: 's1', grid_properties: { row_count: rowCount } }] };
+    else if (url.includes('/sheets/query')) data = { sheets: [{ sheet_id: 's1', grid_properties: { row_count: rowCount, column_count: headers.length } }] };
     else if (method === 'GET' && url.includes('/values/')) {
       const range = decodeURIComponent(url.split('/values/')[1]);
-      if (range.endsWith('A1:Z1')) data = { valueRange: { values: [headers] } };
+      if (/!A1:[A-Z]+1$/.test(range)) data = { valueRange: { values: [headers] } };
       else {
         if (failRead) return { json: async () => ({ code: 1, msg: '读取失败' }) };
         const start = Number(/!A(\d+)/.exec(range)[1]);
@@ -168,7 +168,11 @@ for (const type of ['sheets', 'base']) {
     const result = await c.run(undefined, {}, '');
     assert.equal(result.operation, 'created');
     assert.equal(c.requests.filter(r => r.method === 'GET' && r.url.includes('/records')).length, 0);
-    assert.equal(c.requests.filter(r => r.url.includes('/sheets/query')).length, 0);
+    // sheets 会读一次工作表元数据以确定列数，但不得发起匹配列扫描；base 不读任何单元格
+    const valueReads = c.requests
+      .filter(r => r.url.includes('/values/'))
+      .map(r => decodeURIComponent(r.url.split('/values/')[1]));
+    assert.deepEqual(valueReads, type === 'sheets' ? ['s1!A1:D1'] : []);
   });
 }
 
@@ -221,4 +225,20 @@ test('configuration refuses invalid match fields instead of silently using appen
       fields: [{ name: 'ID', type: 'current_url' }] }] });
     assert.equal(result.ok, false);
   }
+});
+
+test('sheet headers beyond column Z are read and written', async () => {
+  const headers = [...Array.from({ length: 26 }, (_, i) => `C${i + 1}`), '用户画像', '人群占比'];
+  const c = client({ headers });
+  const result = await c.run({ 用户画像: '一二线女性', 人群占比: '12%' }, {}, '');
+  assert.equal(result.operation, 'created');
+  assert.deepEqual(
+    c.requests.filter(r => r.url.includes('/values/')).map(r => decodeURIComponent(r.url.split('/values/')[1])),
+    ['s1!A1:AB1']
+  );
+  assert.equal(c.writes[0].body.valueRange.range, 's1!A:AB');
+  const row = c.writes[0].body.valueRange.values[0];
+  assert.equal(row.length, 28);
+  assert.equal(row[26], '一二线女性');
+  assert.equal(row[27], '12%');
 });

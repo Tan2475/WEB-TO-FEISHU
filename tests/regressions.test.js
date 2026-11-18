@@ -17,6 +17,9 @@ function sheetClient(headers) {
     fetch: async (url, options = {}) => {
       let data;
       if (url.includes('/auth/')) data = { code: 0, tenant_access_token: 'test' };
+      else if (url.includes('/sheets/query')) {
+        data = { code: 0, data: { sheets: [{ sheet_id: 's1', grid_properties: { row_count: 10, column_count: headers.length } }] } };
+      }
       else if (url.includes('/values/')) data = { code: 0, data: { valueRange: { values: [headers] } } };
       else {
         writes.push({ url, body: JSON.parse(options.body) });

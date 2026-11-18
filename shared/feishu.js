@@ -289,24 +289,32 @@ async function appendToFeishu(appId, appSecret, feishuUrl, recordData, screensho
   }
   else if (parsed.type === 'sheet') {
     // 电子表格 API (Spreadsheet)
-    // 1. 获取工作表信息。如果没有 sheetId，获取第一个 sheet 的 ID。
-    let targetSheetId = parsed.sheetId;
-    if (!targetSheetId) {
-      const metaUrl = `https://open.feishu.cn/open-apis/sheets/v3/spreadsheets/${parsed.token}/sheets/query`;
-      const metaRes = await fetch(metaUrl, { headers: { 'Authorization': `Bearer ${accessToken}` } });
-      const metaData = await metaRes.json();
-      if (metaData.code !== 0) throw new Error(`获取电子表格信息失败: ${metaData.msg}`);
+    // 1. 获取工作表元数据：缺少 sheetId 时用于定位首个分表，
+    //    同时取实际列数，避免按固定 26 列读表头而漏掉 AA 之后的列。
+    const metaUrl = `https://open.feishu.cn/open-apis/sheets/v3/spreadsheets/${parsed.token}/sheets/query`;
+    const metaRes = await fetch(metaUrl, { headers: { 'Authorization': `Bearer ${accessToken}` } });
+    const metaData = await metaRes.json();
+    if (metaData.code !== 0) throw new Error(`获取电子表格信息失败: ${metaData.msg}`);
 
-      const sheetsList = metaData.data.sheets;
-      if (!sheetsList || sheetsList.length === 0) {
-        throw new Error("无法读取该表格：未能获取到分表(Sheet)列表。");
-      }
-      targetSheetId = sheetsList[0].sheet_id;
+    const sheetsList = metaData.data && metaData.data.sheets;
+    if (!sheetsList || sheetsList.length === 0) {
+      throw new Error("无法读取该表格：未能获取到分表(Sheet)列表。");
     }
 
-    // 2. 读取第一行作为表头映射
-    if (!targetSheetId) throw new Error("无法获取SheetId");
-    const getRangeUrl = `https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/${parsed.token}/values/${targetSheetId}!A1:Z1`;
+    const targetSheetId = parsed.sheetId || sheetsList[0].sheet_id;
+    const targetSheet = sheetsList.find(item => item.sheet_id === targetSheetId);
+    if (!targetSheet) {
+      throw new Error(`未找到子表(${targetSheetId})，请检查链接中的 sheet 参数是否有效。`);
+    }
+
+    const columnCount = Number(targetSheet.grid_properties && targetSheet.grid_properties.column_count);
+    if (!Number.isInteger(columnCount) || columnCount < 1) {
+      throw new Error('无法读取工作表列数，数据尚未写入。');
+    }
+
+    // 2. 读取第一行作为表头映射，范围按实际列数取满整行
+    const headerLastColumn = columnLetter(columnCount - 1);
+    const getRangeUrl = `https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/${parsed.token}/values/${targetSheetId}!A1:${headerLastColumn}1`;
     const headerRes = await fetch(getRangeUrl, { headers: { 'Authorization': `Bearer ${accessToken}` } });
     const headerData = await headerRes.json();
     if (headerData.code !== 0) throw new Error(`读取表头失败: ${headerData.msg}`);
@@ -334,7 +342,9 @@ async function appendToFeishu(appId, appSecret, feishuUrl, recordData, screensho
       throw new Error('没有可写入的字段，数据尚未写入。');
     }
 
-    // 3. 构建将要插入的数组
+    // 3. 构建将要插入的数组。写入宽度以实际表头长度为准，
+    //    避免向未使用的空列写值。
+    const writeLastColumn = columnLetter(headers.length - 1);
     const rowValues = new Array(headers.length).fill("");
     for (const [key, val] of Object.entries(recordData)) {
       const index = headerIndexOf(key);
@@ -374,7 +384,7 @@ async function appendToFeishu(appId, appSecret, feishuUrl, recordData, screensho
         },
         body: JSON.stringify({
           valueRange: {
-            range: `${targetSheetId}!A:Z`,
+            range: `${targetSheetId}!A:${writeLastColumn}`,
             values: [rowValues]
           }
         })
